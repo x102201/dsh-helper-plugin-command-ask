@@ -94,12 +94,15 @@ Both scratch homes were deleted afterwards.
 
 ## 4. Activation inside a real tree
 
-`scripts/verify-profile.ps1 -Probe` builds a scratch profile that links this checkout the way the install command does, then prints markers from inside `apply()`:
+`scripts/verify-profile.ps1 -Probe` builds a scratch profile (inside `env_001ca237`, using that environment's dsh binary) that links this checkout the way the install command does, then prints markers from inside `apply()`:
 
 ```text
+ok: profile composed over a directory link to …/env_001ca237/.dsh-probe/probe/dsh-helper-plugin-command-ask
 ok: the bundle patch composed a command-ask row anchored inside the package
-ok: the web profile activated and served http://127.0.0.1:55789
+ok: the web profile activated and served http://127.0.0.1:50924
 ok: apply() ran in the real tree with every service resolved, and the /ask registration path executed
+
+all checks passed
 ```
 
 dsh fails the boot loudly for any composed entry that does not reach the active state (`assertEntriesActivated`), so a successful boot plus the marker means the plugin body ran with `commands`, `tools`, `systemPrompt`, and `sessionProjections` resolved, and the `ctx.inject(['commands'], …)` callback that registers `/ask` executed.

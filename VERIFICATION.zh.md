@@ -94,12 +94,15 @@ dependencies:
 
 ## 4. 真实树内的激活
 
-`scripts/verify-profile.ps1 -Probe` 会搭一个按安装命令同样方式链接本目录的临时 profile，并从 `apply()` 内部打印标记：
+`scripts/verify-profile.ps1 -Probe` 会在 `env_001ca237` 内（用该环境的 dsh 二进制）搭一个按安装命令同样方式链接本目录的临时 profile，并从 `apply()` 内部打印标记：
 
 ```text
+ok: profile composed over a directory link to …/env_001ca237/.dsh-probe/probe/dsh-helper-plugin-command-ask
 ok: the bundle patch composed a command-ask row anchored inside the package
-ok: the web profile activated and served http://127.0.0.1:55789
+ok: the web profile activated and served http://127.0.0.1:50924
 ok: apply() ran in the real tree with every service resolved, and the /ask registration path executed
+
+all checks passed
 ```
 
 dsh 对任何未达到 active 状态的条目都会让启动响亮失败（`assertEntriesActivated`），所以「启动成功 + 标记出现」意味着插件主体确实执行了、`commands`/`tools`/`systemPrompt`/`sessionProjections` 全部解析成功、注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调也跑了。
