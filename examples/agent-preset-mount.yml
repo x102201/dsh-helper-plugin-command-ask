@@ -1,0 +1,34 @@
+# Alternative mounting: inside an agent preset instead of the host plane.
+#
+# The bundle patch mounts the plugin once, globally, for every agent. That is the
+# right default: a global command, a global prompt section, and a global tool
+# guard all behave identically for every session, whatever preset it runs.
+#
+# Plan mode takes the other route — it is mounted per preset, under an
+# entry-local `isolate` realm — because its state is per-agent by nature. You can
+# mount ask mode the same way, for example to give ask mode to one preset only
+# (an expensive read-only reviewer on `standard` while other presets stay free to
+# edit). Do NOT do both at once: two rows providing `askMode` in the same realm
+# collide, and two registrations of the `ask` projection key with the same
+# `stateVersion` are shared rather than duplicated.
+#
+# Where it goes: a copy of a shipped preset in
+# `$DSH_HOME/.agent-presets/<name>/agent.cordis.yml` (the shipped presets live in
+# `@deepseek-ai/dsh-agent-presets/presets/<name>/`). The preset file is a plain
+# entry list, so append this block:
+#
+# Note the service name: a row that provides a service in a preset MUST sit in a
+# group with an `isolate` realm, or it publishes into the root realm where
+# another preset publishing `askMode` collides.
+
+- id: ask-mode
+  name: cordis:group
+  group: true
+  isolate:
+    askMode: true
+  config:
+    - id: command-ask
+      # The package name resolves from the profile that owns the preset.
+      name: 'dsh-helper-plugin-command-ask'
+      config:
+        enforce: true

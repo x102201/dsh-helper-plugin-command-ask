@@ -1,0 +1,17 @@
+# Run the plugin straight from a checkout, with no install at all.
+#
+#   dsh --profile web --patch <checkout>/examples/standalone.patch.yml
+#
+# Relative `name`s are anchored to THIS patch file, so `../index.js` points at
+# the plugin entry beside this directory. Copy the whole checkout anywhere and
+# the path still holds — the same property the bundle patch relies on.
+#
+# This is the fastest way to try a change: edit index.js or lib/*.js, restart
+# dsh, and the new code is live.
+
+- insert:
+    - id: command-ask-standalone
+      name: ../index.js
+      config:
+        # Keep every default; this overlay exists to prove the row mounts.
+        enforce: true

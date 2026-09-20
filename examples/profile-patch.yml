@@ -1,0 +1,60 @@
+# Wire the plugin into a profile's own patch layer, with config overrides.
+#
+# Use this instead of the bundle when the package is already resolvable in the
+# profile (a `link:`/`github:` dependency added with `dsh plugin --profile web
+# add`, or a package copied into the profile tree) and you want to change the
+# plugin's config at the same time.
+#
+# Where it goes:
+#   $DSH_HOME/profiles/web/cordis.patch.yml    (your patch layer)
+# or pass it directly:
+#   dsh --profile web --patch examples/profile-patch.yml
+#
+# A patch replaces the targeted row's whole `config` mapping. Because this patch
+# *inserts* the row rather than targeting the bundle's row, it must state every
+# key it wants; everything omitted keeps the plugin's default.
+
+- insert:
+    - id: command-ask
+      # The bare package name resolves from the profile's node_modules, which is
+      # what `dsh plugin --profile web add <spec>` populates.
+      name: 'dsh-helper-plugin-command-ask'
+      config:
+        # Guidance shown to the model while ask mode is active. Omit to use the
+        # built-in text.
+        section: |
+          You are in ask mode: answer questions about this workspace and change nothing.
+          Investigate read-only, cite file paths and line numbers, and say what you could not confirm.
+          When a change is wanted, describe it and tell the user to run /ask off.
+        # Deny the listed tools while ask mode is active. `enforce: false` keeps
+        # the mode advisory (guidance only).
+        enforce: true
+        # Replace the default deny list. Keep the shells here: anything can be
+        # written through them.
+        blockedTools:
+          - write
+          - edit
+          - str_replace_editor
+          - apply_patch
+          - pwsh
+          - bash
+          - terminal
+          - todo_write
+          - create_goal
+          - update_goal
+          - subagent
+          - subagent_fork
+          - workflow
+          - ralph
+          - send_message
+          - interrupt_agent
+          - job_kill
+        # Always-allowed exceptions, checked before blockedTools. Useful for a
+        # read-only deployment tool that happens to share a blocked name.
+        allowedTools: []
+        # Leaving plan mode when ask mode is entered avoids two contradictory
+        # stances being active at once.
+        supersedePlanMode: true
+        # Inject a one-line "the user switched this session to ask mode" notice
+        # when the switch happens between turns.
+        narrate: true

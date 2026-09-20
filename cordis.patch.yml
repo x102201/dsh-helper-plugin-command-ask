@@ -1,0 +1,42 @@
+# The dsh-helper-plugin-command-ask bundle patch.
+#
+# This file is what `package.json`'s `dsh.bundle.patch` points at, so installing
+# the package as a profile bundle is enough:
+#
+#   dsh plugin --profile web add link:/absolute/path/to/dsh-helper-plugin-command-ask
+#   dsh plugin --profile web add github:<owner>/<repo>
+#
+# `dsh plugin ... add` reconciles `dsh.profile.bundles` from the installed state,
+# so the package above joins the layer stack automatically; no hand editing of
+# the profile manifest is needed. Restart `dsh --profile web` (or `dsh web`)
+# afterwards to mount it.
+#
+# `name: ./index.js` is anchored to THIS file's directory by dsh-app-boot's
+# `anchorInsertedPluginNames`, so the row resolves inside the installed copy of
+# the package — a pnpm store copy, a `link:` symlink, or a `github:` checkout —
+# without depending on how the package was installed.
+#
+# The row is a host-plane row on purpose. The command registry, the system
+# prompt, the session-projection registry, and the tool registry are all host
+# services, and a plain (global) contribution is visible to every agent no
+# matter which agent preset it runs.
+#
+# ── overriding the config ───────────────────────────────────────────────────
+# A patch replaces a targeted row's whole `config` mapping, and every key here
+# is optional, so restate only what you change. Put this in the profile's own
+# `cordis.patch.yml` (or a `--patch` overlay applied after this bundle):
+#
+#   - id: command-ask
+#     config:
+#       enforce: false          # guidance only, no tool guard
+#       supersedePlanMode: false
+#       blockedTools: [write, edit, pwsh]
+#       section: |
+#         ...your own ask-mode guidance...
+#
+# Accepted keys: section, enforce, blockedTools, allowedTools,
+# supersedePlanMode, narrate. See README.md.
+
+- insert:
+    - id: command-ask
+      name: ./index.js

@@ -1,0 +1,47 @@
+{
+  "name": "dsh-helper-plugin-command-ask",
+  "version": "0.1.0",
+  "description": "dsh plugin: an /ask collaboration mode (Cursor-style read-only Q&A) modeled on /plan — a durable per-session mode, a prompt section, an optional read-only tool guard, and the /ask command.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "command",
+    "ask-mode",
+    "read-only"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./lib/*": "./lib/*",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "cordis.patch.yml",
+    "examples",
+    "scripts",
+    "test",
+    "test-support",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:direct": "node scripts/run-tests.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "private": false
+}
