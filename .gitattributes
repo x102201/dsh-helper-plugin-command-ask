@@ -1,0 +1,4 @@
+# Keep the published/git-packed files byte-identical across checkouts: this
+# package is consumed from GitHub by `dsh plugin --profile web add github:...`,
+# and CRLF in JS/YAML is noise there.
+* text=auto eol=lf
