@@ -2,14 +2,14 @@
 
 English | [中文](README.zh.md)
 
-An **`/ask` collaboration mode** for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), modeled on the shipped `/plan` mode and on Cursor's **Ask** mode: a persistent, read-only Q&A stance for the current session.
+An **`/ask` collaboration mode** for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), modeled on the shipped `/plan` mode and on Cursor's **Ask** mode: a read-only Q&A answer for the turn the question belongs to.
 
-While ask mode is active the agent answers questions about the workspace, cites what it inspected, and changes nothing — and an optional tool guard *enforces* that instead of merely asking for it. `/ask off` returns the session to normal work.
+`/ask <question>` answers that one question read-only — the agent cites what it inspected and changes nothing — and an optional tool guard *enforces* that instead of merely asking for it. **The mode ends with its turn**, so a later message without `/ask` is ordinary work again: ask something, then just say "do it". `/ask off` only cancels the mode early.
 
 ```text
-/ask                          enter ask mode
-/ask why is the retry budget 3?    enter and send that question under ask guidance
-/ask off                      leave ask mode
+/ask why is the retry budget 3?    answer this read-only, then back to normal
+/ask                              arm ask mode for the next turn
+/ask off                          cancel early (never required)
 ```
 
 ---
@@ -18,14 +18,15 @@ While ask mode is active the agent answers questions about the workspace, cites 
 
 | Piece | Behavior |
 |---|---|
-| `/ask` command | Enters ask mode, or enters it and submits the trailing message (images/files allowed). `/ask off` leaves. |
+| `/ask` command | Arms ask mode, optionally with the trailing question (images/files allowed). `<scope: turn>` covers one turn; `session` (config) keeps the `/plan`-like standing stance until `/ask off`. |
+| Turn boundary | A turn-scoped mode is logged off by an `agent/turn-stopping` listener, so the next request is assembled without it — no `/ask off` needed. |
 | `ask:policy` prompt section | Renders the deployment's guidance on every request while the mode is active, and nothing while it is off. |
-| Durable state | One whole-value `ask/mode` event in the session log, folded by an `ask` session-projection unit: resume, fork, and compaction recover the mode. |
+| Durable state | One whole-value `ask/mode` event per switch in the session log, folded by an `ask` session-projection unit: resume, fork, and compaction recover the mode. |
 | Read-only guard | On by default: a monotonic `ctx.tools.guard()` denies the configured mutating tools while ask mode is active, and tells the model to answer from what it can inspect. |
-| Plan-mode handoff | Entering ask mode leaves plan mode, so two contradictory stances are never active at once. |
+| Plan-mode handoff | Only with `scope: session`: entering a standing ask mode leaves plan mode, so two contradictory stances are never active at once. |
 | Programmatic control | Provides `ctx.askMode` with `get(agent)`, `set(agent, active)`, `isActive(session)`. |
 
-Modes are sticky, exactly like `/plan`: the stance lasts until the user leaves it, not until the next message.
+Each ask turn is a fresh, self-contained stance: the guidance is present exactly in the requests it governs, and the `ask/mode` log records every switch.
 
 ## Install
 
@@ -111,18 +112,23 @@ Every key is optional; a bare row gets the defaults. Config is validated at load
 ```yaml
 - id: command-ask
   config:
+    scope: turn          # one turn per /ask (default) …
     enforce: false
     blockedTools: [write, edit, pwsh]
+# … or scope: session for the /plan-like standing mode
 ```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `section` | string | built-in guidance (see `lib/config.js`) | Text rendered as the `ask:policy` prompt section while the mode is active. |
+| `scope` | `turn` \| `session` | `turn` | `turn`: ask mode covers the turn it was entered for and is logged off at that turn's boundary. `session`: it stands until `/ask off`, like `/plan`. |
+| `section` | string | built-in guidance for the chosen scope (see `lib/config.js`) | Text rendered as the `ask:policy` prompt section while the mode is active. |
 | `enforce` | boolean | `true` | Register the read-only tool guard. `false` keeps the mode advisory: guidance only. |
 | `blockedTools` | string[] | the 22 mutating tools listed below | Tool names denied while ask mode is active. **Replaces** the default list. |
 | `allowedTools` | string[] | `[]` | Names that always pass, checked before `blockedTools`. |
-| `supersedePlanMode` | boolean | `true` | Log plan mode off when ask mode is entered. |
-| `narrate` | boolean | `true` | Inject a one-line "the user switched this session to ask mode" notice when the switch happens between turns. |
+| `supersedePlanMode` | boolean | `false` for `scope: turn`, `true` for `session` | Log plan mode off when ask mode is entered. A one-turn mode leaves the modes around it alone. |
+| `narrate` | boolean | `false` for `scope: turn`, `true` for `session` | Inject a one-line "the user switched this session to ask mode" notice when the switch happens between turns. A one-turn mode has nothing to narrate: the guidance is simply present in the turn it governs and gone afterwards. |
+
+Explicit values always win: `scope: turn` with `narrate: true` is a legal (if chatty) combination.
 
 Where to put an override: the profile's own `cordis.patch.yml` (`$DSH_HOME/profiles/web/cordis.patch.yml`), a `--patch` overlay applied after the bundle, or [`examples/profile-patch.yml`](examples/profile-patch.yml) as a starting point. A patch replaces the targeted row's whole `config`, and every omitted key falls back to the plugin default, so restate only what you change.
 
@@ -140,7 +146,7 @@ It is a **deny** list on purpose: an unknown tool — a deployment's MCP tool, a
 
 ```text
 /ask ──► ctx.commands.register('ask')  ─┐
-                                        ├──► session.append('ask/mode', { active })
+                                        ├──► session.append('ask/mode', { active: true })
 agent/pre-step waterfall ───────────────┘         │
                                                   ▼
                               ctx.sessionProjections unit 'ask'  ──►  view { active, pending }
@@ -149,30 +155,36 @@ agent/pre-step waterfall ───────────────┘       
                           ▼                                                ▼
        ctx.systemPrompt.section('ask:policy')              ctx.tools.guard(read-only)
        (guidance on every request while active)            (deny mutating tools while active)
+
+agent/turn-stopping (scope: turn) ──► session.append('ask/mode', { active: false })
 ```
 
 - **Durable state is the log.** `ask/mode` is a whole-value event; the `ask` projection folds it (it also folds `/ask` `command/run`/`command/done` pairs into a `pending` flag). State therefore survives resume, fork, and compaction with no live mirror to keep in sync. Projection `stateVersion: 1`.
 - **Step-boundary appends.** Between turns a selection is appended immediately. During an open turn it stays pending until the next accepted in-turn `agent/pre-step` — the only append point while an agent runs — so a switch is never logged in the middle of a step it does not apply to. A rejected step, an aborted turn, or a failed append leaves the selection pending.
+- **Turn-scoped exit.** The default `scope: turn` logs `ask/mode { active: false }` from an `agent/turn-stopping` listener, which the loop awaits before it commits the turn boundary. The next request is therefore assembled with no `ask:policy` section and no guard, which is what makes "ask a question, then say 'do it'" work without `/ask off`. A failure there is contained and never breaks turn closing.
 - **Prompt stability.** The section is registered once and returns `''` while the mode is off, so entering or leaving a mode never changes the request's tool catalog. This is why the mode can be enforced by a guard instead of by hiding tools.
-- **Narration.** When a logged switch changes what the last `request/header` described, one plugin-sourced notice is injected (`agent.inject` between turns, the admitted step's messages mid-turn), so the model is not left reasoning under the old stance.
+- **Narration** (`scope: session` only). When a logged switch changes what the last `request/header` described, one plugin-sourced notice is injected (`agent.inject` between turns, the admitted step's messages mid-turn), so the model is not left reasoning under the old stance. A one-turn mode needs none: the guidance is present exactly in the turn it governs.
 - **Enforcement seam.** `ctx.tools.guard()` is monotonic and runs after the `tools/pre-execute` waterfall: a denial cannot be overridden by another listener, and it covers nested `run_code` sub-dispatches too (the tool registry propagates the calling agent into sub-dispatches).
-- **Plan-mode handoff.** Ask mode is strictly narrower than plan mode, so entering one leaves the other. The plugin writes plan mode's own durable `plan/mode` event rather than calling a service: no realm crossing, and the fold recovers the result like any other mode change. With plan mode not composed, the check reads an absent projection and does nothing.
+- **Plan-mode handoff** (`scope: session` only): a standing ask mode is strictly narrower than plan mode, so entering one leaves the other. The plugin writes plan mode's own durable `plan/mode` event rather than calling a service: no realm crossing, and the fold recovers the result like any other mode change. With plan mode not composed, the check reads an absent projection and does nothing.
 
 ### Differences from `/plan`
 
-| | `/plan` | `/ask` |
-|---|---|---|
-| Purpose | design, then execute after approval | answer, change nothing |
-| Exit | `exit_plan_mode` with a user review, or `/plan off` | `/ask off` |
-| Enforcement | guidance only (deployment owns sandbox/approval) | guidance **plus** a deny-list tool guard (`enforce`) |
-| Browser UI | composer "Plan" chip over the `plan` projection | none — command result text and the narration notice |
-| Mount plane | per agent preset, in an entry-local realm | one host row, global for every agent |
+| | `/plan` | `/ask` (default) | `/ask` (`scope: session`) |
+|---|---|---|---|
+| Purpose | design, then execute after approval | answer this question, change nothing | answer, change nothing, until asked otherwise |
+| Lifetime | until `exit_plan_mode`/`/plan off` | one turn | until `/ask off` |
+| Exit | `exit_plan_mode` with a user review, or `/plan off` | automatic at the turn boundary | `/ask off` |
+| Enforcement | guidance only (deployment owns sandbox/approval) | guidance **plus** a deny-list tool guard (`enforce`) | same |
+| Other modes | owns the session stance | leaves plan mode alone | logs plan mode off |
+| Browser UI | composer "Plan" chip over the `plan` projection | none — command result text | none — plus the switch notice |
+| Mount plane | per agent preset, in an entry-local realm | one host row, global for every agent | same |
 
 ## Where ask mode is *not* a boundary
 
 - The guard is a **deny list**, so a mutating tool whose name the plugin does not know (a deployment-specific tool) stays callable. Add it to `blockedTools`.
 - The hard boundary stays where it belongs: DSH's sandbox mode and approval policy. Ask mode narrows what the agent *may* do by tool name; it does not change filesystem or process permissions. A read-only deployment is `sandbox: read-only`, independent of this plugin.
 - The model can still answer incorrectly. The guidance demands cited evidence and explicit uncertainty, and nothing more than that.
+- With `scope: turn`, everything the user sends *while that turn runs* is inside the turn and therefore still read-only; the mode is released when the turn ends, not per message. Queue a new message to get ordinary work back.
 - A pending selection is process-local until its boundary append. If the process exits before the next accepted pre-step, that in-flight selection is lost and the UI must reapply it — the same property `/plan` has.
 
 ## Compatibility
@@ -185,7 +197,8 @@ Written against **dsh `0.1.5-rc.2`**. Services and seams used, all host-plane:
 | `ctx.systemPrompt.section()` + `getSectionOrder('PLAN_POLICY')` | the `ask:policy` section |
 | `ctx.sessionProjections.register()` / `stateOf()` | the `ask` unit and the `plan`/`turnBoundary` reads |
 | `ctx.tools.guard()` | the read-only denial |
-| `ctx.on('agent/pre-step')`, `agent.steer()`, `agent.inject()` | boundary commits and narration |
+| `ctx.on('agent/pre-step')`, `agent.steer()`, `agent.inject()` | pending commits, the steered question, narration |
+| `ctx.on('agent/turn-stopping')` | the turn-scoped exit |
 | `session.append()`, `ctx.provide('askMode')` | durable state and programmatic control |
 | projection `stateSchema`/`viewSchema` | a tiny `parse`-compatible validator, not `zod` |
 
@@ -200,13 +213,13 @@ npm test              # node --test
 npm run test:direct   # one process instead (for sandboxes that block the runner's child processes)
 ```
 
-72 tests cover the config validation, the projection fold and its schemas, the mode state machine (commit / queue / cancel / no-op, boundary appends, failed appends, plan-mode supersession, narration), the guard, the package's installability properties, and the plugin's wiring over a fake Cordis tree — including the full `/ask` → guard blocks `write` → `/ask off` → guard allows `write` path and a log replay after resume.
+82 tests cover the config validation (including the `scope` defaults), the projection fold and its schemas, the mode state machine (commit / queue / cancel / no-op, boundary appends, failed appends, plan-mode supersession, narration, the turn-scoped `disarm`), the guard, the package's installability properties, and the plugin's wiring over a fake Cordis tree — including ask turns that end on their own boundary, several of them in a row, and a log replay after resume.
 
 ### Verification status
 
 Every layer below was run; the live ones used a scratch `$DSH_HOME` and an isolated dsh environment (`env_001ca237`), never the profile serving the authoring session. Full command transcripts and raw output: [`VERIFICATION.md`](VERIFICATION.md).
 
-1. **Behavior** — 72 unit/integration tests drive the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test-support/harness.mjs`).
+1. **Behavior** — 82 unit/integration tests drive the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test-support/harness.mjs`).
 2. **Package shape** — static tests pin the property both install methods depend on: the runtime imports no bare specifier (a `link:` install cannot resolve one, because Node resolves a linked package's imports from its real path) and the package ships no install-time script pnpm would have to allowlist.
 3. **The install commands** — against scratch profiles, with dsh `0.1.5-rc.2` and pnpm 12.5.1:
    - `dsh plugin --profile web add link:<absolute checkout>` → initialized the profile, linked the checkout, and the reconciler appended `dsh-helper-plugin-command-ask` to `dsh.profile.bundles` on its own.
@@ -214,24 +227,29 @@ Every layer below was run; the live ones used a scratch `$DSH_HOME` and an isola
    - `git clone --bare` of this repository, then `dsh plugin --profile web add git+file://<bare repo>` → same reconciliation, same row. This is pnpm's git fetcher, i.e. the `github:` code path with a local transport.
    In every case `--dump-config` composed `id: command-ask` with the name anchored inside the installed copy, and `--port 0 --no-open` activated and served the UI.
 4. **Activation in a real tree** — `scripts/verify-profile.ps1 -Probe` prints markers from inside `apply()`: the row reached the active state (dsh fails loudly on any entry that does not), and `apply()` ran with `commands`, `tools`, `systemPrompt`, and `sessionProjections` all resolved, so the `ctx.inject(['commands'], …)` callback that registers `/ask` executed.
-5. **Live behavior, including real model turns** — `scripts/verify-live.mjs --model-turns` against a running web instance: **18/18 checks passed**. Beyond the command-level checks, one live session produced:
+5. **Live behavior, including real model turns** — `scripts/verify-live.mjs --model-turns` against a running web instance, on the turn-scoped default: **22/22 checks passed**.
 
    ```text
-   ok: ask mode did not create ask-mode-probe.txt (the guard denied the write)
-   ok: outside ask mode the same request created ask-mode-probe.txt
+   ok: the ask turn’s system prompt carried the ask-mode guidance
+   ok: ask mode did not create ask-mode-probe-turn.txt
+   ok: ask mode ended with its turn, with no /ask off
+   ok: the durable state ends at [true,false,true,false]
+   ok: the next message without /ask created ask-mode-probe-turn.txt
+   ok: and its request carried no ask-mode guidance
    ```
 
-   In that run the deployment guidance ("You are in ask mode…") was present in the session's system prompt, the model refused to act and told the user to run `/ask off`, and when it tried to inspect the workspace anyway every tool call came back denied:
+   A separate live probe asked the same instance to run `git status` under `/ask`; the model called `pwsh` three times and every call came back denied, after which it answered from `glob`/`read` instead:
 
    ```text
    Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the "pwsh" tool is
-   blocked for this session. Answer from what you can inspect instead, and tell the user
-   to run /ask off (or start a new message outside ask mode) when the change is actually wanted.
+   blocked for this turn. Answer from what you can inspect instead, and tell the user to
+   send the change as a normal message (without /ask), or to run /ask off to leave ask
+   mode early.
    ```
 
-   After `/ask off` the identical request went through the `write` tool and created the file, so the mode — not the sandbox — was what changed.
+   So the mode — not the sandbox — is what changed the outcome, and it released itself at the turn boundary.
 
-Not covered: the Web composer round-trip through a browser (there is no client half — feedback is the command result text and the narration notice). Everything the command surface can reach is covered above.
+Not covered: the Web composer round-trip through a browser (there is no client half — feedback is the command result text and, for `scope: session`, the switch notice). Everything the command surface can reach is covered above.
 
 ## Layout
 

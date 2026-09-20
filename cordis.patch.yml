@@ -28,13 +28,16 @@
 #
 #   - id: command-ask
 #     config:
+#       scope: session          # turn (default): one turn per /ask; session: until /ask off
 #       enforce: false          # guidance only, no tool guard
-#       supersedePlanMode: false
 #       blockedTools: [write, edit, pwsh]
+#       allowedTools: [run_tests]
+#       supersedePlanMode: false
+#       narrate: false
 #       section: |
 #         ...your own ask-mode guidance...
 #
-# Accepted keys: section, enforce, blockedTools, allowedTools,
+# Accepted keys: scope, section, enforce, blockedTools, allowedTools,
 # supersedePlanMode, narrate. See README.md.
 
 - insert:

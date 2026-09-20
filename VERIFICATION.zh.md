@@ -17,20 +17,20 @@
 
 承载本次对话的那个 dsh 实例**没有**参与下列任何验证：安装、启动、实时检查全部在 `env_001ca237` 内完成；除 `link:` 安装本身，每次启动都用该环境下的临时 `$DSH_HOME`。
 
-## 1. 单元与集成测试 —— 73 个
+## 1. 单元与集成测试 —— 82 个
 
 ```sh
 node --test
 ```
 
 ```text
-ℹ tests 73
+ℹ tests 82
 ℹ suites 0
-ℹ pass 73
+ℹ pass 82
 ℹ fail 0
 ```
 
-这些测试跑真实的 `index.js`/`lib/*.js`，对接忠实的 Cordis 接缝替身（`test-support/harness.mjs`）：配置校验、`ask` 投影折叠与 schema、模式状态机（commit / queue / cancel / no-op、边界落盘、写入失败、plan 模式接力、切换提示）、只读守卫，以及包的可安装性性质（无裸模块 import、无安装期脚本）。
+这些测试跑真实的 `index.js`/`lib/*.js`，对接忠实的 Cordis 接缝替身（`test-support/harness.mjs`）：配置校验（含 `scope` 的默认值耦合）、`ask` 投影折叠与 schema、模式状态机（commit / queue / cancel / no-op、边界落盘、写入失败、plan 模式接力、切换提示、逐轮的 `disarm`）、只读守卫，以及包的可安装性性质（无裸模块 import、无安装期脚本）。
 
 ## 2. 安装方式 `link:` —— 装进测试环境自己的 `web` profile
 
@@ -107,24 +107,24 @@ all checks passed
 
 dsh 对任何未达到 active 状态的条目都会让启动响亮失败（`assertEntriesActivated`），所以「启动成功 + 标记出现」意味着插件主体确实执行了、`commands`/`tools`/`systemPrompt`/`sessionProjections` 全部解析成功、注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调也跑了。
 
-## 5. 针对运行中实例的实时验证
+## 5. 针对运行中实例的实时验证（逐轮默认语义）
 
 ```sh
-node scripts/verify-live.mjs --url "http://127.0.0.1:53110/?token=…" --workspace <env>/workspace --model-turns
+node scripts/verify-live.mjs --url "http://127.0.0.1:61371/?token=…" --workspace <env>/workspace --model-turns
 ```
 
 ```text
 ok: exchanged the URL token for a browser-session cookie
-ok: created a live session session-3f1af379-501d-4660-96b7-4cfaacda8989 (preset standard)
+ok: created a live session session-900a9133-0c64-45d7-8868-d572c73c6e08 (preset standard)
 ok: /ask is registered among 7 commands: ask, compact, export, feedback, goal, permission, plan
    description: Enter or leave ask mode (read-only Q&A)
    input: {"hint":"[off|message]","attachments":true}
 ok: the description advertises the read-only stance
 ok: the input hint and attachment support are advertised
 ok: the live ask projection starts at {"active":false,"pending":false}
-ok: /ask → Ask mode on (read-only). Use /ask off to leave.
+ok: /ask → Ask mode on (read-only) for one turn. The answer comes back read-only; a later message without /ask runs normally.
 ok: the projection now reports {"active":true,"pending":false}
-ok: /ask twice → Ask mode is already on. Use /ask off to leave.
+ok: /ask twice → Ask mode is already on; it ends with the current turn.
 ok: /ask off with an image → error: Attachments cannot accompany /ask off.
 ok: the rejected /ask off left the mode on
 ok: the session log holds one ask/mode event: [true]
@@ -132,35 +132,38 @@ ok: the session log recorded 3 /ask invocations
 ok: /ask off → Ask mode off.
 ok: the projection now reports {"active":false,"pending":false}
 ok: durable state folded to [true,false]
-ok: ask mode did not create ask-mode-probe.txt (the guard denied the write)
-ok: outside ask mode the same request created ask-mode-probe.txt
+ok: the ask turn’s system prompt carried the ask-mode guidance
+ok: ask mode did not create ask-mode-probe-turn.txt
+ok: ask mode ended with its turn, with no /ask off
+ok: the durable state ends at [true,false,true,false]
+ok: the next message without /ask created ask-mode-probe-turn.txt
+ok: and its request carried no ask-mode guidance
 
-18/18 checks passed
+22/22 checks passed
 ```
 
-同一个脚本也对 **git 安装**的那份副本跑过（`env_001ca237` 下的临时 `$DSH_HOME`，`--probe-file ask-mode-probe-git.txt`），同样 **18/18 全部通过**，说明两种安装路径行为一致。
+这次运行的命令层部分覆盖了：`/ask`、再一次 `/ask`、`/ask off` 带附件（在模式变化前被拒绝）、以及在还没跑过任何轮次的会话上 `/ask off`——也就是说显式退出仍然可用，`scope: session` 也仍然可用。模型回合部分验证的正是逐轮语义：`/ask` 预置模式 → ask 轮受引导且只读 → 轮次边界自动把模式写回关闭（没有 `/ask off`）→ 紧接着的普通消息成功写入文件。
 
-### 模型实际看到了什么、做了什么
+### 守卫在轮内的实测
 
-取自上文中那个会话的日志（第一轮模型回合：ask 模式下要求创建文件）：
-
-- 部署引导文本确实进入了请求的 system prompt —— 日志里有完整的 `You are in ask mode: answer the user's questions…`；
-- 模型在正文里拒绝动手：*"I can't create that file — I'm in ask mode, which is read-only…"*，并让用户去跑 `/ask off`；
-- 但它仍试图查看工作区时，守卫拒绝了调用：
+另做了一次实时探针：ask 预置后让它执行 `git status`。模型连续三次调用 `pwsh`，每次都被拒绝，随后改用 `glob`/`read` 完成回答：
 
 ```text
-Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the "pwsh" tool is blocked for
-this session. Answer from what you can inspect instead, and tell the user to run /ask off (or
-start a new message outside ask mode) when the change is actually wanted.
+tool calls: ["pwsh","pwsh","pwsh","glob","glob","glob","read","read","read","read","read"]
+ask/mode values: [true,false]
+ask projection at the end: {"active":false,"pending":false}
+guidance in a system prompt: true
+guard denial: "Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the \"pwsh\" tool is blocked for this turn. Answer from what you can inspect instead, and tell the user to send the change as a normal message (without /ask), or to run /ask off to leave ask mode early."
 ```
 
-- 模型接受了拒绝，没有绕路：*"Even read-only shell commands are blocked in this session — the `pwsh` tool itself is denied by the ask-mode policy… I won't retry it or route around it."*；
-- `/ask off` 之后，同一个请求经 `write` 工具成功创建文件，并读回验证（`1: hello`）。
+这里能看出两件事：黑名单确实拦住了它借 shell 查看工作区的念头（它反复尝试，而守卫是单调的，每次都拒绝）；只读工具始终可用，所以问题仍然能被回答。之后模式随该轮结束自行关闭。
 
-也就是说：改变结果的是模式，而真正拦下工具调用的是**强制**（不只是引导文本）。
+### 更早一次 `scope: session` 的运行
+
+同一个脚本最早用常驻模式配置跑过，分别针对 `link:` 安装和**git 安装**的副本（都在 `env_001ca237`、临时 `$DSH_HOME`、`--probe-file ask-mode-probe-git.txt`），各自 18/18 通过。那种配置下 ask 轮之后显式发了 `/ask off`，同一请求随后创建了文件，守卫拒绝文案是 `blocked for this session`——也就是说：两条安装路径行为一致，两种 scope 都能用。
 
 ## 6. 未覆盖的部分
 
-- 浏览器输入框的往返：插件没有客户端半边，反馈来自命令结果文本与切换 notice。实时脚本走的是与输入框相同的 RPC 通道。
+- 浏览器输入框的往返：插件没有客户端半边，反馈来自命令结果文本（`scope: session` 下另有切换 notice）。实时脚本走的是与输入框相同的 RPC 通道。
 - 真实的 `github:` 远端：git 传输用本地 bare 仓库验证，走的是同一个 pnpm fetcher 与同一套 `files` 打包规则。
 - 非 Windows 主机：那里默认被拦的 shell 是 `bash`（`bash` 已在默认黑名单里），`pwsh` 不是。

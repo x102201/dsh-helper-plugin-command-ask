@@ -217,3 +217,36 @@ test('narrate() reports nothing before a request, and follows activeAtLastHeader
   assert.ok(controller.narrate(session, true));
   assert.equal(controller.narrate(session, false), undefined, 'the last request already said default mode');
 });
+
+test('disarm ends a turn-scoped mode and reports whether it changed the log', () => {
+  const { session, agent, controller } = createFixture();
+  assert.equal(controller.disarm(session), false, 'nothing to do while ask mode is off');
+  assert.equal(session.eventsOfType(ASK_MODE_EVENT).length, 0);
+
+  controller.set(agent, true);
+  assert.equal(controller.loggedActive(session), true);
+  assert.equal(controller.disarm(session), true);
+  assert.equal(controller.loggedActive(session), false);
+  assert.deepEqual(session.eventsOfType(ASK_MODE_EVENT).map((event) => event.data), [{ active: true }, { active: false }]);
+  assert.equal(controller.disarm(session), false, 'the second call is a no-op');
+  assert.equal(session.eventsOfType(ASK_MODE_EVENT).length, 2);
+});
+
+test('disarm drops a mid-turn selection that never reached the boundary', () => {
+  const { session, agent, controller } = createFixture({ openTurn: true });
+  controller.set(agent, true); // queued: nothing logged yet
+  assert.equal(controller.disarm(session), false, 'the logged state was already off');
+  assert.equal(controller.pendingOf(session), undefined);
+  assert.equal(session.eventsOfType(ASK_MODE_EVENT).length, 0);
+  assert.equal(controller.effectiveActive(session), false);
+});
+
+test('disarm keeps a failed append visible to the caller', () => {
+  const { session, agent, controller, control } = createFixture();
+  controller.set(agent, true);
+  control.throws = true;
+  assert.throws(() => controller.disarm(session), /append refused/);
+  control.throws = false;
+  assert.equal(controller.loggedActive(session), true, 'the mode stays on until the append succeeds');
+  assert.equal(controller.disarm(session), true);
+});

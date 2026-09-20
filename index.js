@@ -4,18 +4,22 @@
  *
  * ## What it is
  *
- * Cursor's Ask mode is a persistent read-only Q&A stance: the agent answers
- * questions about the codebase, cites what it inspected, and does not change
- * anything until the user switches modes. DSH ships that shape for planning
- * (`/plan` + `exit_plan_mode`); this plugin adds the ask shape:
+ * Cursor's Ask mode is a read-only Q&A stance: the agent answers questions about
+ * the codebase, cites what it inspected, and does not change anything. DSH ships
+ * that shape for planning (`/plan` + `exit_plan_mode`); this plugin adds the ask
+ * shape, scoped to the turn the question belongs to:
  *
- * - `/ask`, `/ask <message>`, and `/ask off` drive one durable per-session mode.
+ * - `/ask <question>` answers that question read-only. The mode ends when the
+ *   turn ends, so the next message without `/ask` is ordinary work again — no
+ *   `/ask off` needed (config `scope`, default `turn`; `session` keeps the
+ *   `/plan`-like sticky stance).
  * - While active, the deployment's guidance is rendered as the `ask:policy`
  *   prompt section on every request.
  * - An optional monotonic tool guard denies mutating tools, so the mode is
  *   enforced rather than merely requested (config `enforce`, default on).
- * - Entering ask mode leaves plan mode, because the two stances contradict each
- *   other.
+ * - With `scope: session`, entering ask mode leaves plan mode, because the two
+ *   standing stances contradict each other; the default one-turn mode leaves
+ *   plan mode alone.
  * - State lives in the session log as whole-value `ask/mode` events folded by an
  *   `ask` projection unit, so resume, fork, and compaction recover it.
  *
@@ -106,6 +110,23 @@ export function apply(ctx, rawConfig) {
     return narration === undefined ? decision : { ...decision, messages: [...decision.messages, narration] };
   });
 
+  // ── the turn boundary that ends a turn-scoped mode ────────────────────────
+  // `/ask <question>` answers one question read-only; it is not a session
+  // stance, so the mode is logged off when the turn that consumed it stops.
+  // A later message without /ask is then ordinary work again, with no `/ask off`
+  // needed. `agent/turn-stopping` is awaited before the boundary commits, so the
+  // off-value is in the log before any later request is assembled. A failure
+  // here is contained: it must never break turn closing.
+  if (config.scope === 'turn') {
+    ctx.on('agent/turn-stopping', ({ agent }) => {
+      try {
+        controller.disarm(agent.session);
+      } catch (error) {
+        ctx.logger.warn('%s: failed to end ask mode at the turn boundary: %o', PLUGIN_NAME, error);
+      }
+    });
+  }
+
   // ── guidance ──────────────────────────────────────────────────────────────
   // The section is registered once, permanently, and renders '' while ask mode
   // is off: entering or leaving a mode changes prompt text only, never the tool
@@ -164,8 +185,9 @@ export function apply(ctx, rawConfig) {
 
   // One line at mount, so a profile log shows what the row decided.
   ctx.logger.info(
-    '%s: /ask ready (%s, %d tool(s) blocked while the mode is on%s)',
+    '%s: /ask ready (scope=%s, %s, %d tool(s) blocked while the mode is on%s)',
     PLUGIN_NAME,
+    config.scope,
     config.enforce ? 'enforcing read-only' : 'guidance only',
     config.enforce ? config.blockedTools.length : 0,
     config.supersedePlanMode ? '' : ', plan mode untouched',
@@ -180,6 +202,7 @@ export function apply(ctx, rawConfig) {
  */
 function handleAskCommand({ agent, rawInput, attachments, controller, config }) {
   const message = typeof rawInput === 'string' ? rawInput.trim() : '';
+  const turnScoped = config.scope === 'turn';
 
   if (message === 'off' && attachments.length > 0) {
     // Rejected before the mode changes, so the composer keeps its draft and cards.
@@ -211,6 +234,14 @@ function handleAskCommand({ agent, rawInput, attachments, controller, config }) 
   }
 
   const planNote = supersededPlan ? ' Plan mode was switched off.' : '';
+  if (turnScoped) {
+    if (outcome === 'committed') return { kind: 'success', text: `Ask mode on (read-only) for one turn. The answer comes back read-only; a later message without /ask runs normally.${planNote}` };
+    if (outcome === 'queued') return { kind: 'success', text: 'Entering ask mode for the rest of this turn (applies from the next step).' };
+    if (outcome === 'cancelled') return { kind: 'success', text: 'Ask mode stays on for this turn.' };
+    return message === '' && attachments.length === 0
+      ? { kind: 'success', text: `Ask mode is already on; it ends with the current turn.${config.enforce ? '' : ' (enforcement is off)'}` }
+      : { kind: 'success', text: 'Ask mode is already on; answering your message read-only.' };
+  }
   if (outcome === 'committed') return { kind: 'success', text: `Ask mode on (read-only). Use /ask off to leave.${planNote}` };
   if (outcome === 'queued') return { kind: 'success', text: 'Entering ask mode (applies from the next step). Use /ask off to leave.' };
   if (outcome === 'cancelled') return { kind: 'success', text: 'Ask mode stays on.' };

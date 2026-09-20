@@ -2,14 +2,14 @@
 
 [English](README.md) | 中文
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）用的 **`/ask` 协作模式**插件：仿照官方 `/plan` 模式、对齐 Cursor 的 **Ask** 模式——对当前会话开启一个持久、只读的问答态。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）用的 **`/ask` 协作模式**插件：仿照官方 `/plan` 模式、对齐 Cursor 的 **Ask** 模式——对**这一轮提问**给出只读回答。
 
-ask 模式生效期间，Agent 只回答问题、只引用它真正读过的内容、不改动任何东西；可选的工具守卫会**强制执行**这一点（而不只是口头要求）。输入 `/ask off` 回到正常干活状态。
+`/ask 问题` 只让这一轮变成只读问答：Agent 只引用它真正读过的内容、不改动任何东西；可选的工具守卫会**强制执行**这一点。**模式在该轮结束时自动关闭**，所以之后不带 `/ask` 的消息就是普通干活：先问，再说一句"执行"即可。`/ask off` 只是提前取消。
 
 ```text
-/ask                          进入 ask 模式
-/ask 为什么重试预算是 3？        进入 ask 模式，并把这个问题作为该模式下的消息发出
-/ask off                      退出 ask 模式
+/ask 为什么重试预算是 3？      这一轮只读回答，然后恢复正常
+/ask                          为下一轮预置 ask 模式
+/ask off                      提前取消（从来不必要）
 ```
 
 ---
@@ -18,14 +18,15 @@ ask 模式生效期间，Agent 只回答问题、只引用它真正读过的内�
 
 | 组成 | 行为 |
 |---|---|
-| `/ask` 命令 | 进入 ask 模式；带后缀消息时进入并提交该消息（支持图片/文件附件）。`/ask off` 退出。 |
+| `/ask` 命令 | 预置 ask 模式，可带后缀问题（支持图片/文件附件）。`scope: turn`（默认）只覆盖一轮；`scope: session` 是 `/plan` 式常驻模式，直到 `/ask off`。 |
+| 轮次边界 | 逐轮模式由 `agent/turn-stopping` 监听器写回关闭，因此下一次请求组装时就已经没有它了——不需要 `/ask off`。 |
 | `ask:policy` 提示词分段 | 模式生效时在每次请求都渲染部署方配置的引导文本；未生效时不贡献任何文本。 |
-| 持久状态 | 会话日志里的一条整值事件 `ask/mode`，由 `ask` 会话投影单元折叠：恢复（resume）、分叉（fork）、压缩（compaction）后模式都还在。 |
+| 持久状态 | 每次切换在会话日志里写一条整值事件 `ask/mode`，由 `ask` 会话投影单元折叠：恢复（resume）、分叉（fork）、压缩（compaction）后模式都还在。 |
 | 只读守卫 | 默认开启：用 `ctx.tools.guard()` 注册单调守卫，在 ask 模式生效时拒绝被列入的改动类工具，并告知模型改为「基于可查看的内容回答」。 |
-| 与 plan 模式接力 | 进入 ask 模式会退出 plan 模式，避免两种互相矛盾的姿态同时生效。 |
+| 与 plan 模式接力 | 仅在 `scope: session` 时：常驻 ask 模式与 plan 模式互斥，进入即退出对方。 |
 | 编程接口 | 提供 `ctx.askMode`：`get(agent)`、`set(agent, active)`、`isActive(session)`。 |
 
-模式是**粘性**的，和 `/plan` 一样：一直持续到用户主动退出，而不是只作用于下一条消息。
+每一轮 ask 都是自包含的：引导文本只出现在它管辖的那几次请求里，而 `ask/mode` 事件记录每一次开关。
 
 ## 安装
 
@@ -111,18 +112,23 @@ dsh plugin --profile web remove dsh-helper-plugin-command-ask
 ```yaml
 - id: command-ask
   config:
+    scope: turn          # 每次 /ask 只覆盖一轮（默认）……
     enforce: false
     blockedTools: [write, edit, pwsh]
+# …… 或 scope: session 回到 /plan 式常驻模式
 ```
 
 | 键 | 类型 | 默认值 | 含义 |
 |---|---|---|---|
-| `section` | string | 内置引导文本（见 `lib/config.js`） | 模式生效时渲染进 `ask:policy` 提示词分段的文本。 |
+| `scope` | `turn` \| `session` | `turn` | `turn`：ask 模式只覆盖它进入的那一轮，并在该轮边界写回关闭。`session`：常驻到 `/ask off`，与 `/plan` 同构。 |
+| `section` | string | 按 scope 选择的内置引导文本（见 `lib/config.js`） | 模式生效时渲染进 `ask:policy` 提示词分段的文本。 |
 | `enforce` | boolean | `true` | 是否注册只读工具守卫。`false` 表示模式只作建议：仅靠引导文本。 |
 | `blockedTools` | string[] | 下面列出的 22 个改动类工具 | ask 模式生效时被拒绝的工具名。**整体替换**默认列表。 |
 | `allowedTools` | string[] | `[]` | 永远放行的名字，优先于 `blockedTools` 判断。 |
-| `supersedePlanMode` | boolean | `true` | 进入 ask 模式时把 plan 模式置为关闭。 |
-| `narrate` | boolean | `true` | 跨轮次切换模式时，注入一行「用户把本会话切到了 ask 模式」的提示。 |
+| `supersedePlanMode` | boolean | `turn` 下为 `false`，`session` 下为 `true` | 进入 ask 模式时把 plan 模式置为关闭。逐轮模式不动周围的模式。 |
+| `narrate` | boolean | `turn` 下为 `false`，`session` 下为 `true` | 跨轮次切换模式时注入一行「用户把本会话切到了 ask 模式」的提示。逐轮模式无需提示：引导文本只出现在它管辖的那一轮，之后自然消失。 |
+
+显式配置永远优先：`scope: turn` 配 `narrate: true` 是合法（只是略啰嗦）的组合。
 
 覆盖配置写在哪里：profile 自己的 `cordis.patch.yml`（`$DSH_HOME/profiles/web/cordis.patch.yml`）、在 bundle 之后应用的 `--patch` 覆盖层，或直接参考 [`examples/profile-patch.yml`](examples/profile-patch.yml)。补丁会**整体替换**目标行的 `config`，而省略的键都会回落到插件默认值，所以只写你要改的部分即可。
 
@@ -153,26 +159,30 @@ agent/pre-step 瀑布 ───────────────────�
 
 - **持久状态就是日志。** `ask/mode` 是整值事件，`ask` 投影单元折叠它（同时把 `/ask` 的 `command/run`/`command/done` 折叠成一个 `pending` 标记）。因此 resume / fork / compaction 天然恢复，没有需要同步的活动镜像。投影 `stateVersion: 1`。
 - **只在步边界落盘。** 轮次之间选择立刻写入日志；轮次进行中则保持 pending，直到下一个被接受的 `agent/pre-step`——这是 Agent 运行期间唯一的追加点——所以切换绝不会落在它并不适用的那一步中间。步骤被拒绝、轮次被取消、写入失败，都会让选择继续挂着。
+- **逐轮自动退出。** 默认 `scope: turn` 由 `agent/turn-stopping` 监听器写回 `ask/mode { active: false }`；该事件在轮次边界提交前被 await，因此下一次请求组装时已经没有 `ask:policy`、也没有守卫。这正是「先问一句、再说'执行'」不需要 `/ask off` 的原因。这里失败会被兜住，绝不影响轮次收尾。
 - **提示词稳定。** 分段只注册一次，模式关闭时返回 `''`，因此进出模式都不会改变请求的工具目录。这也是为什么可以用「守卫」而不是「藏工具」来实现强制只读。
-- **切换提示（narration）。** 当已落盘的切换改变了上一次 `request/header` 描述过的状态时，注入一条 notice（轮次之间用 `agent.inject`，轮次内挂到被接受步骤的消息上），避免模型继续按旧姿态推理。
+- **切换提示（narration，仅 `scope: session`）。** 当已落盘的切换改变了上一次 `request/header` 描述过的状态时，注入一条 notice（轮次之间用 `agent.inject`，轮次内挂到被接受步骤的消息上），避免模型继续按旧姿态推理。逐轮模式不需要它：引导文本只出现在它管辖的那一轮。
 - **强制点。** `ctx.tools.guard()` 是单调的，且在 `tools/pre-execute` 瀑布之后运行：任何监听器都无法翻案，而且对 `run_code` 的嵌套子调用同样生效（工具注册表会把调用方 Agent 传给子调用）。
-- **与 plan 模式接力。** ask 模式严格弱于 plan 模式，因此二者互斥。插件直接写 plan 模式自己的持久事件 `plan/mode`，而不是调用它的服务：不跨隔离域，日志折叠能像其它模式切换一样恢复结果；若该 profile 没挂 plan 模式，读到的是「无此投影」，什么都不做。
+- **与 plan 模式接力（仅 `scope: session`）。** 常驻 ask 模式严格弱于 plan 模式，因此二者互斥。插件直接写 plan 模式自己的持久事件 `plan/mode`，而不是调用它的服务：不跨隔离域，日志折叠能像其它模式切换一样恢复结果；若该 profile 没挂 plan 模式，读到的是「无此投影」，什么都不做。
 
 ### 与 `/plan` 的差异
 
-| | `/plan` | `/ask` |
-|---|---|---|
-| 目的 | 先设计，批准后再执行 | 只回答，什么都不改 |
-| 退出方式 | `exit_plan_mode` + 用户审阅，或 `/plan off` | `/ask off` |
-| 强制力 | 仅引导文本（沙箱/审批由部署方决定） | 引导文本 **加上** 黑名单工具守卫（`enforce`） |
-| 浏览器 UI | 输入框的 “Plan” 徽标，读 `plan` 投影 | 无——靠命令结果文本与切换提示 |
-| 挂载平面 | 每个 Agent preset、entry-local 隔离域 | 一行 host 行，对所有 Agent 全局生效 |
+| | `/plan` | `/ask`（默认） | `/ask`（`scope: session`） |
+|---|---|---|---|
+| 目的 | 先设计，批准后再执行 | 只回答这一个问题，什么都不改 | 持续只回答，什么都不改 |
+| 生命周期 | 直到 `exit_plan_mode`/`/plan off` | 一轮 | 直到 `/ask off` |
+| 退出方式 | `exit_plan_mode` + 用户审阅，或 `/plan off` | 轮次边界自动退出 | `/ask off` |
+| 强制力 | 仅引导文本（沙箱/审批由部署方决定） | 引导文本 **加上** 黑名单工具守卫（`enforce`） | 同上 |
+| 对其他模式 | 占用会话姿态 | 不动 plan 模式 | 会把 plan 模式置为关闭 |
+| 浏览器 UI | 输入框的 “Plan” 徽标，读 `plan` 投影 | 无，靠命令结果文本 | 无，另有切换提示 |
+| 挂载平面 | 每个 Agent preset、entry-local 隔离域 | 一行 host 行，对所有 Agent 全局生效 | 同上 |
 
 ## ask 模式**不是**的边界
 
 - 守卫是**黑名单**：名字不在列表里的改动类工具（例如部署方自己的工具）仍然可调用。需要拦就加进 `blockedTools`。
 - 真正的硬边界仍在原处：dsh 的 sandbox 模式与审批策略。ask 模式只是按工具名收窄「可以做什么」，它不改变文件系统或进程权限；要真正只读，用 `sandbox: read-only`，与本插件相互独立。
 - 模型仍然可能答错。引导文本要求它给出出处、明说「未能确认」的部分——仅此而已。
+- `scope: turn` 下，那一轮进行中你发的所有内容都还在这一轮里，因此仍是只读；模式是**按轮**释放，不是按条消息释放。想恢复普通干活，下一条排队即可。
 - pending 选择在落盘前是进程内的。如果在下一个被接受的 pre-step 之前进程退出，这次进行中的选择会丢失，需要 UI 重新施加——`/plan` 有同样的性质。
 
 ## 兼容性
@@ -185,7 +195,8 @@ agent/pre-step 瀑布 ───────────────────�
 | `ctx.systemPrompt.section()` + `getSectionOrder('PLAN_POLICY')` | `ask:policy` 分段 |
 | `ctx.sessionProjections.register()` / `stateOf()` | `ask` 单元，以及读取 `plan`/`turnBoundary` |
 | `ctx.tools.guard()` | 只读拒绝 |
-| `ctx.on('agent/pre-step')`、`agent.steer()`、`agent.inject()` | 边界落盘与切换提示 |
+| `ctx.on('agent/pre-step')`、`agent.steer()`、`agent.inject()` | pending 落盘、问题的 steer、切换提示 |
+| `ctx.on('agent/turn-stopping')` | 逐轮模式的自动退出 |
 | `session.append()`、`ctx.provide('askMode')` | 持久状态与编程接口 |
 | 投影的 `stateSchema`/`viewSchema` | 自带的极简 `parse` 兼容校验器，不依赖 `zod` |
 
@@ -200,13 +211,13 @@ npm test              # node --test
 npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境）
 ```
 
-72 个测试覆盖：配置校验、投影折叠与 schema、模式状态机（commit / queue / cancel / no-op、边界落盘、写入失败、plan 模式接力、切换提示）、守卫、包的可安装性性质，以及在伪 Cordis 树上的完整接线——包括 `/ask` → 守卫拦下 `write` → `/ask off` → 守卫放行 `write` 的整链路，和 resume 后的日志重放。
+82 个测试覆盖：配置校验（含 `scope` 的默认值耦合）、投影折叠与 schema、模式状态机（commit / queue / cancel / no-op、边界落盘、写入失败、plan 模式接力、切换提示、逐轮的 `disarm`）、守卫、包的可安装性性质，以及在伪 Cordis 树上的完整接线——包括「多个 ask 轮各自在自己的边界结束」和 resume 后的日志重放。
 
 ### 验证状态
 
 下面每一层都实跑过；带「实时」字样的几层使用一次性 `$DSH_HOME`，并在独立的 dsh 环境（`env_001ca237`）中进行，**没有碰过承载本次对话的那个 profile**。完整的命令与原始输出见 [`VERIFICATION.zh.md`](VERIFICATION.zh.md)。
 
-1. **行为** —— 72 个单元/集成测试，跑真实的 `index.js`/`lib/*.js`，对接忠实的 Cordis 接缝替身（`test-support/harness.mjs`）。
+1. **行为** —— 82 个单元/集成测试，跑真实的 `index.js`/`lib/*.js`，对接忠实的 Cordis 接缝替身（`test-support/harness.mjs`）。
 2. **包形态** —— 静态测试守住两种安装方式都依赖的性质：运行时代码不 import 任何裸模块名（`link:` 安装无法解析裸名，Node 按真实路径解析被链接包的 import），且不携带任何需要 pnpm allowlist 的安装期脚本。
 3. **两种安装命令** —— 在一次性 profile 上、dsh `0.1.5-rc.2` + pnpm 12.5.1：
    - `dsh plugin --profile web add link:<绝对路径>` → 初始化 profile、建立链接，**对齐逻辑自己**把 `dsh-helper-plugin-command-ask` 追加进 `dsh.profile.bundles`。
@@ -214,24 +225,29 @@ npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境�
    - 对本仓库 `git clone --bare`，再 `dsh plugin --profile web add git+file://<bare repo>` → 同样的对齐、同样的行。这条走的就是 pnpm 的 git fetcher，也就是 `github:` 的代码路径，只是换了本地传输。
    三种情况下 `--dump-config` 都组合出 `id: command-ask`（名字锚定在已安装副本内部），`--port 0 --no-open` 都能激活并对外服务。
 4. **真实树里的激活** —— `scripts/verify-profile.ps1 -Probe` 会从 `apply()` 内部打印标记：行确实达到 active 状态（dsh 对任何未激活条目都会响亮失败），`apply()` 执行时 `commands`/`tools`/`systemPrompt`/`sessionProjections` 全部解析成功，因此注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调确实跑了。
-5. **实时行为（含真实模型回合）** —— 对运行中的 web 实例跑 `scripts/verify-live.mjs --model-turns`：**18/18 全部通过**。除命令层面的校验外，其中一个真实会话给出：
+5. **实时行为（含真实模型回合，逐轮模式）** —— 对运行中的 web 实例跑 `scripts/verify-live.mjs --model-turns`：**22/22 全部通过**。
 
    ```text
-   ok: ask mode did not create ask-mode-probe.txt (the guard denied the write)
-   ok: outside ask mode the same request created ask-mode-probe.txt
+   ok: the ask turn’s system prompt carried the ask-mode guidance
+   ok: ask mode did not create ask-mode-probe-turn.txt
+   ok: ask mode ended with its turn, with no /ask off
+   ok: the durable state ends at [true,false,true,false]
+   ok: the next message without /ask created ask-mode-probe-turn.txt
+   ok: and its request carried no ask-mode guidance
    ```
 
-   该回合里：部署引导文本（"You are in ask mode…"）确实出现在会话的 system prompt 中；模型拒绝动手，并告诉用户去跑 `/ask off`；而当它仍试图查看工作区时，所有工具调用都被拒绝：
+   另外单独做了一次实时探针：同一个 ask 轮里让它执行 `git status`，模型连续三次调用 `pwsh`，每次都被拒绝，随后改用 `glob`/`read` 完成回答：
 
    ```text
    Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the "pwsh" tool is
-   blocked for this session. Answer from what you can inspect instead, and tell the user
-   to run /ask off (or start a new message outside ask mode) when the change is actually wanted.
+   blocked for this turn. Answer from what you can inspect instead, and tell the user to
+   send the change as a normal message (without /ask), or to run /ask off to leave ask
+   mode early.
    ```
 
-   `/ask off` 之后，同一个请求顺利经 `write` 工具创建了文件——改变结果的是模式，而不是沙箱。
+   也就是说：真正改变结果的是模式（而不是沙箱），并且模式在轮次边界自行释放。
 
-**未**覆盖：浏览器里 Web 输入框的往返（插件没有客户端半边，反馈靠命令结果文本与切换 notice）。命令面能触达的部分，上面都已覆盖。
+**未**覆盖：浏览器里 Web 输入框的往返（插件没有客户端半边，反馈靠命令结果文本，`scope: session` 下另有切换 notice）。命令面能触达的部分，上面都已覆盖。
 
 ## 目录结构
 
@@ -239,7 +255,7 @@ npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境�
 index.js                     Cordis 插件：接线 + /ask 命令处理器
 cordis.patch.yml             bundle 补丁（dsh.bundle.patch）：插入一行 host 行
 lib/config.js                配置 schema、默认值、内置引导文本
-lib/controller.js            模式状态机（commit / queue / cancel、切换提示、plan 接力）
+lib/controller.js            模式状态机（commit / queue / cancel、disarm、切换提示、plan 接力）
 lib/projection.js            `ask` 会话投影单元
 lib/guard.js                 只读工具守卫
 lib/message.js               零依赖的 createUserMessage / notice

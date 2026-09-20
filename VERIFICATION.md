@@ -17,20 +17,20 @@ What was actually run for this plugin, and what came out. Every command below wa
 
 The dsh instance serving the authoring session was **not** used for any of this: installation, booting, and live checks all ran in `env_001ca237`, and every boot that was not the `link:` install used a scratch `$DSH_HOME` under that environment.
 
-## 1. Unit and integration suite — 73 tests
+## 1. Unit and integration suite — 82 tests
 
 ```sh
 node --test
 ```
 
 ```text
-ℹ tests 73
+ℹ tests 82
 ℹ suites 0
-ℹ pass 73
+ℹ pass 82
 ℹ fail 0
 ```
 
-These drive the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test-support/harness.mjs`): config validation, the `ask` projection fold and its schemas, the mode state machine (commit / queue / cancel / no-op, boundary appends, failed appends, plan-mode supersession, narration), the read-only guard, and the package's installability properties (no bare imports, no install-time scripts).
+These drive the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test-support/harness.mjs`): config validation (including the `scope` defaults), the `ask` projection fold and its schemas, the mode state machine (commit / queue / cancel / no-op, boundary appends, failed appends, plan-mode supersession, narration, the turn-scoped `disarm`), the read-only guard, and the package's installability properties (no bare imports, no install-time scripts).
 
 ## 2. Install method `link:` — into the test environment's own `web` profile
 
@@ -107,24 +107,24 @@ all checks passed
 
 dsh fails the boot loudly for any composed entry that does not reach the active state (`assertEntriesActivated`), so a successful boot plus the marker means the plugin body ran with `commands`, `tools`, `systemPrompt`, and `sessionProjections` resolved, and the `ctx.inject(['commands'], …)` callback that registers `/ask` executed.
 
-## 5. Live verification against a running instance
+## 5. Live verification against a running instance (turn-scoped default)
 
 ```sh
-node scripts/verify-live.mjs --url "http://127.0.0.1:53110/?token=…" --workspace <env>/workspace --model-turns
+node scripts/verify-live.mjs --url "http://127.0.0.1:61371/?token=…" --workspace <env>/workspace --model-turns
 ```
 
 ```text
 ok: exchanged the URL token for a browser-session cookie
-ok: created a live session session-3f1af379-501d-4660-96b7-4cfaacda8989 (preset standard)
+ok: created a live session session-900a9133-0c64-45d7-8868-d572c73c6e08 (preset standard)
 ok: /ask is registered among 7 commands: ask, compact, export, feedback, goal, permission, plan
    description: Enter or leave ask mode (read-only Q&A)
    input: {"hint":"[off|message]","attachments":true}
 ok: the description advertises the read-only stance
 ok: the input hint and attachment support are advertised
 ok: the live ask projection starts at {"active":false,"pending":false}
-ok: /ask → Ask mode on (read-only). Use /ask off to leave.
+ok: /ask → Ask mode on (read-only) for one turn. The answer comes back read-only; a later message without /ask runs normally.
 ok: the projection now reports {"active":true,"pending":false}
-ok: /ask twice → Ask mode is already on. Use /ask off to leave.
+ok: /ask twice → Ask mode is already on; it ends with the current turn.
 ok: /ask off with an image → error: Attachments cannot accompany /ask off.
 ok: the rejected /ask off left the mode on
 ok: the session log holds one ask/mode event: [true]
@@ -132,35 +132,38 @@ ok: the session log recorded 3 /ask invocations
 ok: /ask off → Ask mode off.
 ok: the projection now reports {"active":false,"pending":false}
 ok: durable state folded to [true,false]
-ok: ask mode did not create ask-mode-probe.txt (the guard denied the write)
-ok: outside ask mode the same request created ask-mode-probe.txt
+ok: the ask turn’s system prompt carried the ask-mode guidance
+ok: ask mode did not create ask-mode-probe-turn.txt
+ok: ask mode ended with its turn, with no /ask off
+ok: the durable state ends at [true,false,true,false]
+ok: the next message without /ask created ask-mode-probe-turn.txt
+ok: and its request carried no ask-mode guidance
 
-18/18 checks passed
+22/22 checks passed
 ```
 
-The same script ran against the **git-installed** copy in `env_001ca237` (scratch `$DSH_HOME`, `--probe-file ask-mode-probe-git.txt`) and also reported **18/18 checks passed**, so the two install paths behave identically.
+The command-level half of that run exercises `/ask`, `/ask` again, `/ask off` with an attachment (rejected before the mode changes), and `/ask off` on a session where no turn has run yet: the explicit exit still works, and `scope: session` is still available. The model-turn half is the turn-scoped behaviour: `/ask` arms the mode, the ask turn is guided and read-only, the turn boundary logs the mode off with no `/ask off`, and the very next ordinary message writes the file.
 
-### What the model actually saw and did
+### The guard, live, inside a turn
 
-From that session's log (the first model turn, in ask mode, asked to create a file):
-
-- the deployment guidance was in the request's system prompt — the log contains the whole `You are in ask mode: answer the user's questions…` text;
-- the model refused in prose — *"I can't create that file — I'm in ask mode, which is read-only…"* — and told the user to run `/ask off`;
-- when it tried to inspect the workspace anyway, the guard denied the call:
+A second live probe asked the same instance to run `git status` while `/ask` was armed. The model called `pwsh` three times, every call came back denied, and it then answered through `glob`/`read`:
 
 ```text
-Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the "pwsh" tool is blocked for
-this session. Answer from what you can inspect instead, and tell the user to run /ask off (or
-start a new message outside ask mode) when the change is actually wanted.
+tool calls: ["pwsh","pwsh","pwsh","glob","glob","glob","read","read","read","read","read"]
+ask/mode values: [true,false]
+ask projection at the end: {"active":false,"pending":false}
+guidance in a system prompt: true
+guard denial: "Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the \"pwsh\" tool is blocked for this turn. Answer from what you can inspect instead, and tell the user to send the change as a normal message (without /ask), or to run /ask off to leave ask mode early."
 ```
 
-- the model accepted the denial instead of working around it — *"Even read-only shell commands are blocked in this session — the `pwsh` tool itself is denied by the ask-mode policy… I won't retry it or route around it."*;
-- after `/ask off`, the identical request went through the `write` tool and the file was created and read back (`1: hello`).
+Two things are visible there: the deny list is what kept the model from inspecting through the shell — it tried repeatedly, and the guard is monotonic, so every attempt came back denied — and the read-only tools stayed available so the question could still be answered. The mode then ended with its turn.
 
-So the mode changed the outcome, and the enforcement — not just the guidance — is what stopped the tool call.
+### An earlier run under `scope: session`
+
+The same script was first run with the standing-mode configuration, against the `link:` install and against a **git-installed** copy (both in `env_001ca237`, scratch `$DSH_HOME`s, `--probe-file ask-mode-probe-git.txt`), reporting 18/18 each. In that configuration an explicit `/ask off` followed the ask turn, the identical request then created the file, and the guard denial read `blocked for this session` — i.e. the two install paths behave identically, and both scopes work.
 
 ## 6. Not covered
 
-- The browser composer round-trip: the plugin ships no client half, so feedback is the command result text plus the narration notice. The live script exercises the same RPC channel the composer uses.
+- The browser composer round-trip: the plugin ships no client half, so feedback is the command result text (plus the switch notice under `scope: session`). The live script exercises the same RPC channel the composer uses.
 - A published `github:` remote: the git transport was verified with a local bare repository, which exercises the same pnpm fetcher and `files`-based packing.
-- Non-Windows hosts: `pwsh` is the blocked shell there by default; on Linux/macOS `bash` is in the default deny list instead.
+- Non-Windows hosts: `pwsh` is the shell the default deny list blocks; on Linux/macOS that is `bash` instead.

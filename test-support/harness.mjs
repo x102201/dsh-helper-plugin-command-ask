@@ -211,6 +211,12 @@ export function createFakeCtx(options = {}) {
       };
       return next();
     },
+    /** Dispatch `agent/turn-stopping` as the loop does before the boundary commits. */
+    runTurnStopping(agent) {
+      for (const handler of listeners.get('agent/turn-stopping') ?? []) {
+        handler({ agent, turn: 1, signal: new AbortController().signal });
+      }
+    },
     /** The registered `/ask` definition, when the commands service was composed. */
     command(name) {
       return commands.find((definition) => definition.name === name);

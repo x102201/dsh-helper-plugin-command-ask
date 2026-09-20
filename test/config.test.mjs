@@ -1,17 +1,35 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_BLOCKED_TOOLS, DEFAULT_SECTION, PLUGIN_NAME, resolveConfig } from '../lib/config.js';
+import { DEFAULT_BLOCKED_TOOLS, DEFAULT_SECTION, PLUGIN_NAME, SESSION_SECTION, TURN_SECTION, resolveConfig } from '../lib/config.js';
 
-test('defaults describe a read-only, enforcing mode', () => {
+test('defaults describe a one-turn, enforcing mode', () => {
   const config = resolveConfig(undefined);
+  assert.equal(config.scope, 'turn');
+  assert.equal(config.section, TURN_SECTION);
   assert.equal(config.section, DEFAULT_SECTION);
   assert.equal(config.enforce, true);
-  assert.equal(config.supersedePlanMode, true);
-  assert.equal(config.narrate, true);
+  assert.equal(config.supersedePlanMode, false, 'a one-turn mode must not disturb plan mode');
+  assert.equal(config.narrate, false, 'a one-turn mode needs no switch narration');
   assert.deepEqual(config.blockedTools, DEFAULT_BLOCKED_TOOLS);
   assert.deepEqual(config.allowedTools, []);
   assert.ok(Object.isFrozen(config));
+});
+
+test('scope: session restores the standing-mode defaults', () => {
+  const config = resolveConfig({ scope: 'session' });
+  assert.equal(config.scope, 'session');
+  assert.equal(config.section, SESSION_SECTION);
+  assert.equal(config.supersedePlanMode, true);
+  assert.equal(config.narrate, true);
+  assert.equal(config.enforce, true);
+});
+
+test('explicit switches win over the scope defaults', () => {
+  const config = resolveConfig({ scope: 'turn', narrate: true, supersedePlanMode: true });
+  assert.equal(config.narrate, true);
+  assert.equal(config.supersedePlanMode, true);
+  assert.equal(config.section, TURN_SECTION, 'the guidance still follows the scope');
 });
 
 test('the default deny list blocks every mutating shape and leaves readers alone', () => {
@@ -28,6 +46,10 @@ test('the guidance text carries the load-bearing ask-mode rules', () => {
   for (const phrase of ['ask mode', '/ask off', 'change nothing', 'read-only', 'tool catalog stays the same']) {
     assert.ok(DEFAULT_SECTION.includes(phrase), `guidance should mention ${JSON.stringify(phrase)}`);
   }
+  // The turn-scoped variant has to say the mode ends with the turn, or a model
+  // that saw one ask turn keeps refusing work afterwards.
+  assert.ok(TURN_SECTION.includes('without /ask is ordinary work again'));
+  assert.ok(SESSION_SECTION.includes('Stay in ask mode until the user leaves it'));
 });
 
 test('a bare row (no config) and an empty mapping are equivalent', () => {
@@ -36,6 +58,7 @@ test('a bare row (no config) and an empty mapping are equivalent', () => {
 
 test('each key can be overridden', () => {
   const config = resolveConfig({
+    scope: 'turn',
     section: 'custom guidance',
     enforce: false,
     blockedTools: ['write'],
@@ -43,6 +66,7 @@ test('each key can be overridden', () => {
     supersedePlanMode: false,
     narrate: false,
   });
+  assert.equal(config.scope, 'turn');
   assert.equal(config.section, 'custom guidance');
   assert.equal(config.enforce, false);
   assert.deepEqual(config.blockedTools, ['write']);
@@ -79,4 +103,6 @@ test('wrong types fail at load', () => {
   assert.throws(() => resolveConfig({ blockedTools: 'write' }), /config\.blockedTools/);
   assert.throws(() => resolveConfig({ blockedTools: ['write', ''] }), /config\.blockedTools/);
   assert.throws(() => resolveConfig({ allowedTools: [3] }), /config\.allowedTools/);
+  assert.throws(() => resolveConfig({ scope: 'once' }), /config\.scope/);
+  assert.throws(() => resolveConfig({ scope: true }), /config\.scope/);
 });

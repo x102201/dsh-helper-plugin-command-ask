@@ -20,12 +20,16 @@
       # what `dsh plugin --profile web add <spec>` populates.
       name: 'dsh-helper-plugin-command-ask'
       config:
+        # `turn` (default): `/ask <question>` answers that question read-only and
+        # the mode ends with the turn, so the next message without /ask is
+        # ordinary work. `session`: the /plan-like standing mode until /ask off.
+        scope: turn
         # Guidance shown to the model while ask mode is active. Omit to use the
-        # built-in text.
+        # built-in text for the chosen scope.
         section: |
-          You are in ask mode: answer questions about this workspace and change nothing.
+          You are in ask mode for this turn: answer the question about this workspace and change nothing.
           Investigate read-only, cite file paths and line numbers, and say what you could not confirm.
-          When a change is wanted, describe it and tell the user to run /ask off.
+          The mode ends with this turn: if a change is wanted, say so and the user can send it as a normal message.
         # Deny the listed tools while ask mode is active. `enforce: false` keeps
         # the mode advisory (guidance only).
         enforce: true
@@ -52,9 +56,7 @@
         # Always-allowed exceptions, checked before blockedTools. Useful for a
         # read-only deployment tool that happens to share a blocked name.
         allowedTools: []
-        # Leaving plan mode when ask mode is entered avoids two contradictory
-        # stances being active at once.
-        supersedePlanMode: true
-        # Inject a one-line "the user switched this session to ask mode" notice
-        # when the switch happens between turns.
-        narrate: true
+        # Both default on only for `scope: session`; a one-turn mode has no
+        # standing stance to supersede or narrate.
+        supersedePlanMode: false
+        narrate: false

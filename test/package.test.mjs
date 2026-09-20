@@ -90,7 +90,7 @@ test('the standalone overlay points at the plugin entry it sits beside', () => {
 
 test('the config keys documented in the bundle patch are the ones the loader accepts', () => {
   const patch = readFileSync(join(ROOT, manifest.dsh.bundle.patch), 'utf8');
-  const documented = ['section', 'enforce', 'blockedTools', 'allowedTools', 'supersedePlanMode', 'narrate'];
+  const documented = ['scope', 'section', 'enforce', 'blockedTools', 'allowedTools', 'supersedePlanMode', 'narrate'];
   for (const key of documented) {
     assert.ok(patch.includes(key), `the bundle patch should document ${key}`);
     const source = readFileSync(join(ROOT, 'lib', 'config.js'), 'utf8');

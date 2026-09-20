@@ -13,9 +13,9 @@
  *   4. `session/list`          — the live `ask` projection value (`{active,pending}`)
  *   5. `session/page`          — the durable `ask/mode` events in the session log
  *
- * With `--model-turns` it also drives one real turn in ask mode that asks for a
- * file to be created, then one after `/ask off`, and asserts the file appears
- * only in the second case (reporting whether the guard's denial was hit).
+ * With `--model-turns` it also drives two real turns: one under `/ask` that asks
+ * for a file to be created (it must not be, and the mode must end with the
+ * turn), then an ordinary message with no `/ask` (it must create the file).
  *
  * Usage:
  *   node scripts/verify-live.mjs --url "http://127.0.0.1:PORT/?token=TOKEN" \
@@ -214,6 +214,11 @@ async function main() {
 
   if (options.modelTurns) {
     const probePath = join(workspace, options.probeFile);
+    const guidance = (events) => events.filter((event) => event.type === 'system/message'
+      && JSON.stringify(event).includes('You are in ask mode'));
+
+    // Turn 1: `/ask` without a message arms the mode for the turn the next
+    // prompt starts, and the mode must end on its own when that turn stops.
     await command(sessionId, '/ask');
     await call('session/prompt', {
       request: {
@@ -223,13 +228,22 @@ async function main() {
         content: [{ type: 'text', text: `Create a file named ${options.probeFile} in the current working directory containing exactly: hello` }],
       },
     });
-    let turn = await waitForTurnEnd(sessionId);
-    const denied = JSON.stringify(turn.events).includes('ask mode is read-only');
-    if (!turn.settled) fail('the ask-mode turn did not settle before the timeout');
+    const askTurn = await waitForTurnEnd(sessionId);
+    const denied = JSON.stringify(askTurn.events).includes('ask mode is read-only');
+    if (!askTurn.settled) fail('the ask-mode turn did not settle before the timeout');
+    if (guidance(askTurn.events).length === 0) fail('the ask turn’s system prompt carried no ask-mode guidance');
+    else ok('the ask turn’s system prompt carried the ask-mode guidance');
     if (existsSync(probePath)) fail(`ask mode created ${options.probeFile} — the mode is not read-only`);
     else ok(`ask mode did not create ${options.probeFile}${denied ? ' (the guard denied the write)' : ' (the model declined to act)'}`);
 
-    await command(sessionId, '/ask off');
+    const afterTurn = await liveState(sessionId);
+    const modesAfterTurn = modeValues(await sessionEvents(sessionId));
+    if (afterTurn.values.ask?.active === false) ok('ask mode ended with its turn, with no /ask off');
+    else fail(`ask mode outlived its turn: ${JSON.stringify(afterTurn.values.ask)}`);
+    if (modesAfterTurn.at(-1) === false) ok(`the durable state ends at ${JSON.stringify(modesAfterTurn)}`);
+    else fail(`expected the last ask/mode value to be false, saw ${JSON.stringify(modesAfterTurn)}`);
+
+    // Turn 2: an ordinary message — no /ask, no /ask off — must be able to act.
     await call('session/prompt', {
       request: {
         requestId: randomUUID(),
@@ -238,10 +252,14 @@ async function main() {
         content: [{ type: 'text', text: 'Now create that file.' }],
       },
     });
-    turn = await waitForTurnEnd(sessionId);
-    if (!turn.settled) fail('the post-ask turn did not settle before the timeout');
-    if (existsSync(probePath)) ok(`outside ask mode the same request created ${options.probeFile}`);
-    else fail('outside ask mode the file was still not created (a model or tooling problem, not a mode problem)');
+    const plainTurn = await waitForTurnEnd(sessionId);
+    if (!plainTurn.settled) fail('the follow-up turn did not settle before the timeout');
+    if (existsSync(probePath)) ok(`the next message without /ask created ${options.probeFile}`);
+    else fail('a plain follow-up message was still refused (a model or tooling problem, not a mode problem)');
+    const latest = plainTurn.events.filter((event) => event.type === 'system/message').at(-1);
+    const latestCarriesGuidance = latest !== undefined && JSON.stringify(latest).includes('You are in ask mode');
+    if (!latestCarriesGuidance) ok('and its request carried no ask-mode guidance');
+    else fail('the follow-up request still carried ask-mode guidance');
   }
 }
 

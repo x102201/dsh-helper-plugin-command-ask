@@ -65,7 +65,7 @@ test('config.section replaces the guidance', () => {
 });
 
 test('/ask turns the mode on and /ask off turns it off', async () => {
-  const { ctx, agent, session } = mount(undefined);
+  const { ctx, agent, session } = mount({ scope: 'session' });
 
   const on = await executeCommand(ctx, agent, '/ask');
   assert.equal(on.kind, 'success');
@@ -85,6 +85,46 @@ test('/ask turns the mode on and /ask off turns it off', async () => {
 
   const offAgain = await executeCommand(ctx, agent, '/ask off');
   assert.match(offAgain.text, /already off/);
+});
+
+test('by default ask mode covers one turn and ends when that turn stops', async () => {
+  const { ctx, agent, session } = mount(undefined);
+  const [guard] = ctx.guards;
+
+  const result = await executeCommand(ctx, agent, '/ask why is the retry budget 3?');
+  assert.equal(result.kind, 'success');
+  assert.match(result.text, /for one turn/);
+  assert.equal(ctx.provided.askMode.isActive(session), true);
+  assert.ok(guard({ name: 'write', agent }), 'the ask turn is enforced read-only');
+  assert.equal(agent.steered.length, 1, 'the question is steered as the turn’s message');
+
+  // The loop dispatches `agent/turn-stopping` before the boundary commits.
+  ctx.runTurnStopping(agent);
+  assert.equal(ctx.provided.askMode.isActive(session), false, 'ask mode ends with the turn');
+  assert.deepEqual(ctx.projections.viewOf(session, 'ask'), { active: false, pending: false });
+  assert.equal(guard({ name: 'write', agent }), undefined, 'a later message is ordinary work again');
+  assert.equal(ctx.sections[0].text({ agent }), '', 'and the guidance is gone');
+  assert.equal(session.eventsOfType('ask/mode').map((event) => event.data.active).join(','), 'true,false');
+});
+
+test('several ask turns each end on their own boundary, with no /ask off', async () => {
+  const { ctx, agent, session } = mount(undefined);
+  for (let turn = 0; turn < 2; turn += 1) {
+    await executeCommand(ctx, agent, `/ask question ${turn}`);
+    assert.equal(ctx.provided.askMode.isActive(session), true);
+    ctx.runTurnStopping(agent);
+    assert.equal(ctx.provided.askMode.isActive(session), false);
+  }
+  assert.equal(session.eventsOfType('ask/mode').map((event) => event.data.active).join(','), 'true,false,true,false');
+});
+
+test('scope: session keeps the mode on across turns until /ask off', async () => {
+  const { ctx, agent, session } = mount({ scope: 'session' });
+  await executeCommand(ctx, agent, '/ask');
+  ctx.runTurnStopping(agent);
+  ctx.runTurnStopping(agent);
+  assert.equal(ctx.provided.askMode.isActive(session), true, 'a standing mode ignores the turn boundary');
+  assert.ok(ctx.guards[0]({ name: 'write', agent }));
 });
 
 test('/ask <message> enters the mode and steers the message under it', async () => {
@@ -123,16 +163,27 @@ test('bare /ask with attachments steers only the attachments', async () => {
   assert.deepEqual(agent.steered[0].content, [image]);
 });
 
-test('entering ask mode while plan mode is active reports the switch', async () => {
-  const { ctx, agent, session } = mount(undefined);
+test('entering ask mode while plan mode is active reports the switch (scope: session)', async () => {
+  const { ctx, agent, session } = mount({ scope: 'session' });
   session.append('plan/mode', { active: true });
   ctx.projections.setStatic('plan', { active: true });
   const result = await executeCommand(ctx, agent, '/ask');
   assert.match(result.text, /Plan mode was switched off/);
 });
 
+test('the default one-turn mode leaves plan mode alone', async () => {
+  const { ctx, agent, session } = mount(undefined);
+  session.append('plan/mode', { active: true });
+  ctx.projections.setStatic('plan', { active: true });
+  const result = await executeCommand(ctx, agent, '/ask');
+  assert.doesNotMatch(result.text, /Plan mode/);
+  assert.equal(session.eventsOfType('plan/mode').length, 1, 'only the seed event is there');
+  await ctx.runTurnStopping(agent);
+  assert.equal(session.eventsOfType('plan/mode').length, 1, 'and the turn boundary did not touch it either');
+});
+
 test('a selection made mid-turn stays pending until the step boundary', async () => {
-  const { ctx, agent, session, told } = mount(undefined);
+  const { ctx, agent, session, told } = mount({ narrate: true });
   told(false);
   ctx.projections.setStatic('turnBoundary', { openTurnStartSeq: 0 });
 
@@ -148,6 +199,10 @@ test('a selection made mid-turn stays pending until the step boundary', async ()
   assert.equal(decision.messages.length, 1, 'the switch is narrated into the admitted step');
   assert.equal(decision.messages[0].source.form, 'notice');
   assert.match(decision.messages[0].content[0].text, /switched this session to ask mode/);
+
+  // The same turn stops: a queued selection still ends with its turn.
+  ctx.runTurnStopping(agent);
+  assert.equal(ctx.provided.askMode.isActive(session), false);
 });
 
 test('the pre-step listener leaves a rejected or aborted step alone', async () => {
