@@ -31,6 +31,8 @@ ask 模式生效期间，Agent 只回答问题、只引用它真正读过的内�
 
 两种安装方式都支持。插件是纯 ESM（无需构建、零运行时依赖），所以安装时既不需要编译，也不会被 pnpm 拦下来要求 allowlist 构建脚本。
 
+> **前置条件**：`dsh plugin` 会把参数转发给 `pnpm`，所以 pnpm 必须在 `PATH` 上（`corepack enable pnpm` 即可提供）。缺了它会直接报 `pnpm not found on PATH` 并以 127 退出。
+
 ### 方式一：本地目录（`link:`）
 
 ```sh
@@ -183,23 +185,24 @@ npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境�
 
 ### 验证状态
 
-三个层次，都能在本仓库里复现：
+每一层都能在本仓库里复现；下面所有实跑都使用一次性 `$DSH_HOME`，**没有碰过任何真实用户 profile**。
 
-1. **行为** —— 上面的测试跑真实的 `index.js`/`lib/*.js`，对接一份忠实的 Cordis 接缝替身（`test/support/harness.mjs`）。
+1. **行为** —— 上面的测试跑真实的 `index.js`/`lib/*.js`，对接一份忠实的 Cordis 接缝替身（`test-support/harness.mjs`）。
 2. **包形态** —— 静态测试守住两种安装方式都依赖的性质：运行时代码不 import 任何裸模块名（`link:` 安装无法解析裸名，因为 Node 按真实路径解析被链接包的 import），且不携带任何需要 pnpm allowlist 的安装期脚本。
-3. **真实 dsh profile** —— [`scripts/verify-profile.ps1`](scripts/verify-profile.ps1) 会在一个一次性 `$DSH_HOME` 里搭出 web profile，按 `dsh plugin --profile web add link:<dir>` 的方式链接本目录，然后跑 `--dump-config` 和真实的 `--port 0 --no-open` 启动。
+3. **真正的安装命令**，在 dsh `0.1.5-rc.2` + pnpm 12.5.1 的一次性 profile 上实跑：
+   - `dsh plugin --profile web add link:<绝对路径>` → 初始化 profile、建立链接，**对齐逻辑自己**把 `dsh-helper-plugin-command-ask` 追加进 `dsh.profile.bundles`；`--dump-config` 组合出 `id: command-ask` 行（名字锚定在 pnpm 符号链接内部），`--port 0 --no-open` 正常激活并对外服务。
+   - `pnpm pack` → 24 个文件 / 41.5 KB（不含 `node_modules`、`.git`、`.verify`），紧接着 `dsh plugin --profile web add <tarball>` → 同样的对齐结果、同样的行、同样成功启动。`github:` 安装最终落地的就是这样一份打包副本（pnpm 的 git fetcher 用同一套 `files` 规则打包仓库），所以在没有已发布远端的前提下，这是对那条路径最接近的复现。
+4. **树内激活探针** —— `scripts/verify-profile.ps1 -Probe` 还会从 `apply()` 内部打印标记：
 
-第 3 层已经在 **dsh `0.1.5-rc.2`** 上用 `-Probe` 实跑过，输出：
+   ```text
+   ok: the bundle patch composed a command-ask row anchored inside the package
+   ok: the web profile activated and served http://127.0.0.1:55789
+   ok: apply() ran in the real tree with every service resolved, and the /ask registration path executed
+   ```
 
-```text
-ok: the bundle patch composed a command-ask row anchored inside the package
-ok: the web profile activated and served http://127.0.0.1:55789
-ok: apply() ran in the real tree with every service resolved, and the /ask registration path executed
-```
+   也就是说：整棵树达到 active 状态（dsh 对任何未激活条目都会响亮失败）、`apply()` 真实执行且 `commands`/`tools`/`systemPrompt`/`sessionProjections` 全部解析成功、注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调也确实跑了。
 
-也就是说：bundle 行确实被组合出来、整棵树达到 active 状态（dsh 对任何未激活条目都会响亮失败）、`apply()` 真实执行且 `commands`/`tools`/`systemPrompt`/`sessionProjections` 全部解析成功、注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调也确实跑了。
-
-该检查**未**覆盖：模式下的真实模型回合，以及 Web 输入框的往返。插件没有客户端半边，所以在真实会话里敲一次 `/ask` 是只有人能确认的最后一步。
+**未**覆盖：模式下的真实模型回合，以及 Web 输入框的往返。插件没有客户端半边，所以在真实会话里敲一次 `/ask` 是只有人能确认的最后一步。
 
 ## 目录结构
 

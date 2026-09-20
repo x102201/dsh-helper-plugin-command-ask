@@ -31,6 +31,8 @@ Modes are sticky, exactly like `/plan`: the stance lasts until the user leaves i
 
 Both installation styles are supported. The package ships plain ESM (no build step, no runtime dependencies), so nothing has to be compiled or allowlisted by pnpm at install time.
 
+> **Prerequisite:** `dsh plugin` forwards its arguments to `pnpm`, so pnpm must be on `PATH` (`corepack enable pnpm` provides it). Without it the CLI prints `pnpm not found on PATH` and exits 127.
+
 ### 1. From a local checkout (`link:`)
 
 ```sh
@@ -183,23 +185,24 @@ npm run test:direct   # one process instead (for sandboxes that block the runner
 
 ### Verification status
 
-Three layers, each reproducible from this checkout:
+Each layer is reproducible from this checkout; nothing below touched a real user profile (every run used a scratch `$DSH_HOME`).
 
-1. **Behavior** — the suite above drives the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test/support/harness.mjs`).
+1. **Behavior** — the suite above drives the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test-support/harness.mjs`).
 2. **Package shape** — static tests pin the property both install methods depend on: the runtime imports no bare specifier (a `link:` install cannot resolve one, because Node resolves a linked package's imports from its real path) and the package ships no install-time script pnpm would have to allowlist.
-3. **A real dsh profile** — [`scripts/verify-profile.ps1`](scripts/verify-profile.ps1) builds a scratch `$DSH_HOME` whose `web` profile links this checkout exactly the way `dsh plugin --profile web add link:<dir>` does, then runs `--dump-config` and a real `--port 0 --no-open` boot.
+3. **The actual install commands**, run against scratch profiles with dsh `0.1.5-rc.2` and pnpm 12.5.1:
+   - `dsh plugin --profile web add link:<absolute checkout>` → initialized the profile, linked the checkout, and the reconciler appended `dsh-helper-plugin-command-ask` to `dsh.profile.bundles` on its own; `--dump-config` composed `id: command-ask` with the name anchored inside the pnpm symlink, and `--port 0 --no-open` activated and served the UI.
+   - `pnpm pack` → 24 files / 41.5 KB (no `node_modules`, no `.git`, no `.verify`), then `dsh plugin --profile web add <tarball>` → the same reconciliation, the same composed row, and the same successful boot. A `github:` install materializes exactly this packed copy (pnpm's git fetcher packs the repository with the same `files` rules), so this is the closest reproduction of that path available without a published remote.
+4. **An in-tree activation probe** — `scripts/verify-profile.ps1 -Probe` additionally prints markers from inside `apply()`:
 
-Layer 3 was run against **dsh `0.1.5-rc.2`** with `-Probe`, and reported:
+   ```text
+   ok: the bundle patch composed a command-ask row anchored inside the package
+   ok: the web profile activated and served http://127.0.0.1:55789
+   ok: apply() ran in the real tree with every service resolved, and the /ask registration path executed
+   ```
 
-```text
-ok: the bundle patch composed a command-ask row anchored inside the package
-ok: the web profile activated and served http://127.0.0.1:55789
-ok: apply() ran in the real tree with every service resolved, and the /ask registration path executed
-```
+   i.e. the tree reached the active state (dsh fails loudly on any entry that does not), `apply()` executed with `commands`, `tools`, `systemPrompt`, and `sessionProjections` resolved, and the `ctx.inject(['commands'], …)` callback that registers `/ask` ran.
 
-i.e. the scratch profile composed the bundle row, the whole tree reached the active state (dsh fails loudly on any entry that does not), `apply()` executed with `commands`, `tools`, `systemPrompt`, and `sessionProjections` resolved, and the `ctx.inject(['commands'], …)` callback that registers `/ask` ran.
-
-Not covered by that check: a real model turn under the mode, and the Web composer round-trip. There is no client half to test, so typing `/ask` in a live session is the one step only a human session can confirm.
+Not covered: a real model turn under the mode, and the Web composer round-trip. There is no client half to test, so typing `/ask` in a live session is the one step only a human session can confirm.
 
 ## Layout
 
