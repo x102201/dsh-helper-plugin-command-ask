@@ -204,7 +204,7 @@ npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境�
 
 ### 验证状态
 
-下面每一层都实跑过；带「实时」字样的几层使用一次性 `$DSH_HOME`，并在独立的 dsh 环境（`env_001ca237`）中进行，**没有碰过承载本次对话的那个 profile**。
+下面每一层都实跑过；带「实时」字样的几层使用一次性 `$DSH_HOME`，并在独立的 dsh 环境（`env_001ca237`）中进行，**没有碰过承载本次对话的那个 profile**。完整的命令与原始输出见 [`VERIFICATION.zh.md`](VERIFICATION.zh.md)。
 
 1. **行为** —— 72 个单元/集成测试，跑真实的 `index.js`/`lib/*.js`，对接忠实的 Cordis 接缝替身（`test-support/harness.mjs`）。
 2. **包形态** —— 静态测试守住两种安装方式都依赖的性质：运行时代码不 import 任何裸模块名（`link:` 安装无法解析裸名，Node 按真实路径解析被链接包的 import），且不携带任何需要 pnpm allowlist 的安装期脚本。
@@ -250,6 +250,8 @@ scripts/verify-profile.ps1   针对真实 dsh 的一次性 profile 验证（--du
 scripts/verify-live.mjs      针对运行中实例的实时验证（HTTP RPC；--model-turns）
 test/                        测试套件（配置、投影、状态机、守卫、接线、包形态）
 test-support/harness.mjs     驱动接线测试的伪 Cordis 树
+README.md / README.zh.md     中英双语的完整说明
+VERIFICATION.md / .zh.md     实际跑过的验证与原始输出
 ```
 
 ## 许可证

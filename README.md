@@ -204,7 +204,7 @@ npm run test:direct   # one process instead (for sandboxes that block the runner
 
 ### Verification status
 
-Every layer below was run; the live ones used a scratch `$DSH_HOME` and an isolated dsh environment (`env_001ca237`), never the profile serving the authoring session.
+Every layer below was run; the live ones used a scratch `$DSH_HOME` and an isolated dsh environment (`env_001ca237`), never the profile serving the authoring session. Full command transcripts and raw output: [`VERIFICATION.md`](VERIFICATION.md).
 
 1. **Behavior** — 72 unit/integration tests drive the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test-support/harness.mjs`).
 2. **Package shape** — static tests pin the property both install methods depend on: the runtime imports no bare specifier (a `link:` install cannot resolve one, because Node resolves a linked package's imports from its real path) and the package ships no install-time script pnpm would have to allowlist.
@@ -250,6 +250,8 @@ scripts/verify-profile.ps1   scratch-profile verification against a real dsh (--
 scripts/verify-live.mjs      live verification against a running instance (HTTP RPC; --model-turns)
 test/                        the suite (config, projection, controller, guard, wiring, package shape)
 test-support/harness.mjs     the fake-Cordis tree the wiring tests drive
+README.md / README.zh.md     the reference in English and Chinese
+VERIFICATION.md / .zh.md     what was actually run, with raw output
 ```
 
 ## License

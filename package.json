@@ -28,6 +28,8 @@
     "test-support",
     "README.md",
     "README.zh.md",
+    "VERIFICATION.md",
+    "VERIFICATION.zh.md",
     "LICENSE"
   ],
   "dsh": {

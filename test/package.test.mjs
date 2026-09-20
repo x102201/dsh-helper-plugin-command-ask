@@ -99,8 +99,11 @@ test('the config keys documented in the bundle patch are the ones the loader acc
 });
 
 test('the shipped docs exist for both languages', () => {
-  for (const file of ['README.md', 'README.zh.md', 'LICENSE']) {
+  for (const file of ['README.md', 'README.zh.md', 'VERIFICATION.md', 'VERIFICATION.zh.md', 'LICENSE']) {
     assert.ok(existsSync(join(ROOT, file)), `${file} is missing`);
+  }
+  for (const file of ['VERIFICATION.md', 'VERIFICATION.zh.md']) {
+    assert.ok(manifest.files.includes(file), `${file} must be packed`);
   }
 });
 
