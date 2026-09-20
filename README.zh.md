@@ -27,9 +27,9 @@ dsh plugin --profile web add github:x102201/dsh-helper-plugin-command-ask
 
 ---
 
-<a href="docs/assets/ask-mode-demo.mp4"><img src="docs/assets/ask-mode-demo.gif" alt="/ask 只读回答一轮并拒绝写入，随后不带 /ask 的消息正常创建文件" width="900"></a>
+<a href="docs/assets/ask-mode-demo.mp4"><img src="docs/assets/ask-mode-demo.gif" alt="dsh-helper 工作台：/ask 只读回答一轮并拒绝写入，随后不带 /ask 的消息正常创建文件" width="900"></a>
 
-*在 dsh-helper 工作台实录，1.6 倍速：`/ask 问题` 拒绝写入并说明原因，随后一条普通消息"执行"就真的创建了文件。→ [更清晰的 MP4（0.8 MB）](docs/assets/ask-mode-demo.mp4)*
+*在 [**dsh-helper**](https://102201.com/products/dsh-helper/zh/) 工作台实录（1.6 倍速）——左侧是实例列表，四个 dsh 环境并排运行，其中一个装着本插件。`/ask 问题` 拒绝写入并说明原因，随后一条普通消息"执行"就真的创建了文件。→ [更清晰的 MP4（0.8 MB）](docs/assets/ask-mode-demo.mp4)*
 
 ## 它做了什么
 
@@ -299,6 +299,13 @@ test-support/harness.mjs     驱动接线测试的伪 Cordis 树
 README.md / README.zh.md     中英双语的完整说明
 VERIFICATION.md / .zh.md     实际跑过的验证与原始输出
 ```
+
+## 为 dsh-helper 工作台而做
+
+本插件是 [**dsh-helper**](https://102201.com/products/dsh-helper/zh/) 工作台生态的一部分——那个把多个 DeepSeek Harness 实例并排放在桌面上的应用，每个实例有独立的 profile、插件与会话。上面的演示就是它的真实录屏。
+
+- 主页 / 下载：**https://102201.com/products/dsh-helper/zh/**
+- 工作台跑的是原版 `dsh`；像本插件这样的扩展按 profile 安装，就是前面 [安装](#安装) 里那两条命令——不需要 fork，也不需要改 `dsh`。
 
 ## 许可证
 

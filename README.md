@@ -27,9 +27,9 @@ dsh plugin --profile web add github:x102201/dsh-helper-plugin-command-ask
 
 ---
 
-<a href="docs/assets/ask-mode-demo.mp4"><img src="docs/assets/ask-mode-demo.gif" alt="/ask answers a question read-only and refuses to write, then the next message without /ask creates the file" width="900"></a>
+<a href="docs/assets/ask-mode-demo.mp4"><img src="docs/assets/ask-mode-demo.gif" alt="The dsh-helper workbench: /ask answers a question read-only and refuses to write, then the next message without /ask creates the file" width="900"></a>
 
-*Recorded in the dsh-helper workbench, 1.6× speed: `/ask <question>` refuses to write and explains why, then the plain "do it" message creates the file. → [clearer MP4 (0.8 MB)](docs/assets/ask-mode-demo.mp4)*
+*Recorded in the [**dsh-helper**](https://102201.com/products/dsh-helper/en/) workbench (1.6× speed) — the instance list on the left, four live dsh environments side by side, one of them running the plugin. `/ask <question>` refuses to write and explains why; the plain "do it" message that follows creates the file. → [clearer MP4 (0.8 MB)](docs/assets/ask-mode-demo.mp4)*
 
 ## What it does
 
@@ -297,6 +297,13 @@ test-support/harness.mjs     the fake-Cordis tree the wiring tests drive
 README.md / README.zh.md     the reference in English and Chinese
 VERIFICATION.md / .zh.md     what was actually run, with raw output
 ```
+
+## Built for the dsh-helper workbench
+
+This plugin is part of the [**dsh-helper**](https://102201.com/products/dsh-helper/en/) workbench — the desktop app that keeps several DeepSeek Harness instances side by side, each with its own profile, plugins, and sessions. The demo above is a real recording from it.
+
+- Homepage / downloads: **https://102201.com/products/dsh-helper/en/**
+- The workbench runs stock `dsh`; a plugin like this one is installed per profile, exactly as documented in [Install](#install) — no fork, no patched `dsh`.
 
 ## License
 
