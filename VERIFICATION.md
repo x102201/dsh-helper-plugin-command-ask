@@ -110,12 +110,12 @@ dsh fails the boot loudly for any composed entry that does not reach the active 
 ## 5. Live verification against a running instance (turn-scoped default)
 
 ```sh
-node scripts/verify-live.mjs --url "http://127.0.0.1:61371/?token=…" --workspace <env>/workspace --model-turns
+node scripts/verify-live.mjs --url "http://127.0.0.1:53489/?token=…" --workspace <env>/workspace --model-turns
 ```
 
 ```text
 ok: exchanged the URL token for a browser-session cookie
-ok: created a live session session-900a9133-0c64-45d7-8868-d572c73c6e08 (preset standard)
+ok: created a live session session-f09d0baf-fb46-4291-b48c-f9c60b346e63 (preset standard)
 ok: /ask is registered among 7 commands: ask, compact, export, feedback, goal, permission, plan
    description: Enter or leave ask mode (read-only Q&A)
    input: {"hint":"[off|message]","attachments":true}
@@ -127,42 +127,89 @@ ok: the projection now reports {"active":true,"pending":false}
 ok: /ask twice → Ask mode is already on; it ends with the current turn.
 ok: /ask off with an image → error: Attachments cannot accompany /ask off.
 ok: the rejected /ask off left the mode on
-ok: the session log holds one ask/mode event: [true]
 ok: the session log recorded 3 /ask invocations
+ok: every event in the log belongs to the harness vocabulary (no plugin-defined types)
 ok: /ask off → Ask mode off.
 ok: the projection now reports {"active":false,"pending":false}
-ok: durable state folded to [true,false]
+ok: the log holds 4 /ask records, and the state is derived from them
 ok: the ask turn’s system prompt carried the ask-mode guidance
 ok: ask mode did not create ask-mode-probe-turn.txt
 ok: ask mode ended with its turn, with no /ask off
-ok: the durable state ends at [true,false,true,false]
+ok: the release is the turn/end event the harness itself logged
 ok: the next message without /ask created ask-mode-probe-turn.txt
 ok: and its request carried no ask-mode guidance
 
 22/22 checks passed
 ```
 
-The command-level half of that run exercises `/ask`, `/ask` again, `/ask off` with an attachment (rejected before the mode changes), and `/ask off` on a session where no turn has run yet: the explicit exit still works, and `scope: session` is still available. The model-turn half is the turn-scoped behaviour: `/ask` arms the mode, the ask turn is guided and read-only, the turn boundary logs the mode off with no `/ask off`, and the very next ordinary message writes the file.
+The command-level half exercises `/ask`, `/ask` again, `/ask off` with an attachment (rejected before the mode changes), and `/ask off` on a session where no turn has run: the explicit exit still works, `scope: session` is still available, and the log carries nothing but harness events. The model-turn half is the turn-scoped behaviour: `/ask` arms the mode, the ask turn is guided and read-only, the harness's own `turn/end` releases it with no `/ask off`, and the very next ordinary message writes the file.
 
 ### The guard, live, inside a turn
 
-A second live probe asked the same instance to run `git status` while `/ask` was armed. The model called `pwsh` three times, every call came back denied, and it then answered through `glob`/`read`:
+A second live probe asked the instance to run `git status` while `/ask` was armed. The model called `pwsh` three times, every call came back denied, and it then answered through `glob`/`read`:
 
 ```text
 tool calls: ["pwsh","pwsh","pwsh","glob","glob","glob","read","read","read","read","read"]
-ask/mode values: [true,false]
 ask projection at the end: {"active":false,"pending":false}
 guidance in a system prompt: true
 guard denial: "Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the \"pwsh\" tool is blocked for this turn. Answer from what you can inspect instead, and tell the user to send the change as a normal message (without /ask), or to run /ask off to leave ask mode early."
 ```
 
-Two things are visible there: the deny list is what kept the model from inspecting through the shell — it tried repeatedly, and the guard is monotonic, so every attempt came back denied — and the read-only tools stayed available so the question could still be answered. The mode then ended with its turn.
+The deny list is what kept the model from inspecting through the shell — it tried repeatedly, and the guard is monotonic, so every attempt came back denied — while the read-only tools stayed available so the question could still be answered. The mode then ended with its turn.
 
-### An earlier run under `scope: session`
+## 6. The 0.1.x session-loading defect, and its repair
 
-The same script was first run with the standing-mode configuration, against the `link:` install and against a **git-installed** copy (both in `env_001ca237`, scratch `$DSH_HOME`s, `--probe-file ask-mode-probe-git.txt`), reporting 18/18 each. In that configuration an explicit `/ask off` followed the ask turn, the identical request then created the file, and the guard denial read `blocked for this session` — i.e. the two install paths behave identically, and both scopes work.
+0.1.x persisted the mode as its own session event type, `ask/mode`. An out-of-tree plugin cannot add to the harness vocabulary — `Session.append()` cannot set the envelope's `ignorable` marker, and the persistence read path refuses an unknown type that lacks it — so **every session that had ever run `/ask` became unloadable**:
 
-## 6. Not covered
+```text
+failed to observe session "session-abed8fee-…": session "session-abed8fee-…" contains event
+type "ask/mode" (seq 5) unknown to this harness and not marked ignorable; refusing to
+interpret the log — it was likely written by a newer harness
+  (raw log: …\.dsh\sessions\--C-Users-Administrator-Desktop-TEST1--\session-abed8fee-…\session.v3.jsonl.zstd)
+```
+
+Reproduced through the same RPC the UI uses (`session/page` on that session returned exactly that `gateway/internal` error), then repaired in place:
+
+```sh
+node scripts/repair-ask-mode-logs.mjs --sessions <env>/.dsh/sessions                    # dry run: 19 records in 8 files
+node scripts/repair-ask-mode-logs.mjs --sessions <env>/.dsh/sessions --apply --backup <env>/backup-askrepair
+```
+
+```text
+-> --C-Users-Administrator-Desktop-TEST1--\session-abed8fee-…\session.v3.jsonl.zstd: mark 1 ask/mode record(s) ignorable
+…
+scanned 9 artifact(s); 19 record(s) in 8 file(s) rewritten
+```
+
+The record is marked, not removed: the stored log must stay seq-dense ("format v2 event N is not dense", "not contiguous; expected N"). Afterwards every repairable session loads again — `session/page` returns 54 records for the session above — and the log is a concatenated-frame artifact whose first frame is still exactly the header line (`assertIndependentHeaderFrame`), which the repair preserves.
+
+0.2.0 then removed the cause: the mode is folded from the `/ask` **command records** the registry already writes, plus `turn/end` and `request/header`, so the plugin contributes no vocabulary at all. `test/plugin.test.mjs` asserts the log holds only those types, and `verify-live.mjs` asserts the same thing against the running instance on every run.
+
+## 7. Restart and resume
+
+The missing check that would have caught the defect, now part of the routine: use `/ask`, restart the environment (hard kill included), and read the sessions again.
+
+```text
+=== resume check: the session that ran /ask turns, after a restart ===
+session: session-f09d0baf-fb46-4291-b48c-f9c60b346e63
+ask before paging     : {"active":false,"pending":false}
+log records           : 53
+ask command records   : 5
+foreign event types   : []
+ask after paging      : {"active":false,"pending":false}
+```
+
+An **armed-but-not-yet-used** `/ask` also survives a hard kill, because the plugin checkpoints the switch through `ctx.sessions.flush()` as soon as the projection changes (the artifact reached disk in well under a second):
+
+```text
+session-8d4ba696-1c35-4c5d-bcd0-53fbff87e6aa : 6 records after the restart
+  seq 3 command/run name=ask args=""
+  seq 4 command/done kind=success
+ask before paging : {"active":true,"pending":false}
+ask after paging  : {"active":true,"pending":false}
+```
+
+## 8. Not covered
 
 - The browser composer round-trip: the plugin ships no client half, so feedback is the command result text (plus the switch notice under `scope: session`). The live script exercises the same RPC channel the composer uses.
 - A published `github:` remote: the git transport was verified with a local bare repository, which exercises the same pnpm fetcher and `files`-based packing.

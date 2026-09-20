@@ -11,7 +11,9 @@
  *   2. `commands/list`         — `/ask` is registered, with its description and hint
  *   3. `commands/execute`      — `/ask`, `/ask off`, and the attachment rejection
  *   4. `session/list`          — the live `ask` projection value (`{active,pending}`)
- *   5. `session/page`          — the durable `ask/mode` events in the session log
+ *   5. `session/page`          — the `/ask` command records the mode is derived from,
+ *                                and that the log holds no plugin-defined event type
+ *                                (one would make the session unloadable after a restart)
  *
  * With `--model-turns` it also drives two real turns: one under `/ask` that asks
  * for a file to be created (it must not be, and the mode must end with the
@@ -138,7 +140,19 @@ async function waitForTurnEnd(sessionId) {
 
 // ── the checks ───────────────────────────────────────────────────────────────
 
-const modeValues = (events) => events.filter((event) => event.type === 'ask/mode').map((event) => event.data.active);
+/**
+ * Whether an event type belongs to the harness vocabulary. A session event type
+ * this plugin invented (`ask/mode`, in version 0.1.x) cannot be marked
+ * `ignorable` through `Session.append()`, and the persistence reader refuses a
+ * log containing one — so the absence of foreign types is what keeps a session
+ * loadable after a restart, and it is asserted on every run.
+ */
+function noForeignType(type) {
+  return !type.includes('ask/');
+}
+
+/** The `/ask` command records in a log, which is what the mode is derived from. */
+const askRuns = (events) => events.filter((event) => event.type === 'command/run' && event.data.name === 'ask');
 
 async function main() {
   cookie = await authorize();
@@ -192,12 +206,15 @@ async function main() {
   else fail(`the rejected /ask off changed the mode: ${JSON.stringify(afterRejected.values.ask)}`);
 
   const eventsWhileOn = await sessionEvents(sessionId);
-  const modesOn = modeValues(eventsWhileOn);
-  if (modesOn.length === 1 && modesOn[0] === true) ok(`the session log holds one ask/mode event: ${JSON.stringify(modesOn)}`);
-  else fail(`expected ask/mode [true], saw ${JSON.stringify(modesOn)}`);
   const runs = eventsWhileOn.filter((event) => event.type === 'command/run' && event.data.name === 'ask');
   if (runs.length === 3) ok(`the session log recorded ${runs.length} /ask invocations`);
   else fail(`expected 3 /ask command records, saw ${runs.length}`);
+  if (eventsWhileOn.every((event) => noForeignType(event.type))) {
+    ok('every event in the log belongs to the harness vocabulary (no plugin-defined types)');
+  } else {
+    const foreign = [...new Set(eventsWhileOn.map((event) => event.type))].filter((type) => !noForeignType(type));
+    fail(`the log carries plugin-defined event type(s) ${foreign.join(', ')}, which would make it unloadable after a restart`);
+  }
 
   const off = await command(sessionId, '/ask off');
   if (off?.result?.kind === 'success' && /Ask mode off/.test(off.result.text ?? '')) ok(`/ask off → ${off.result.text}`);
@@ -206,9 +223,9 @@ async function main() {
   const afterOff = await liveState(sessionId);
   if (afterOff.values.ask?.active === false) ok(`the projection now reports ${JSON.stringify(afterOff.values.ask)}`);
   else fail(`expected {active:false,...}, saw ${JSON.stringify(afterOff.values.ask)}`);
-  const modesOff = modeValues(await sessionEvents(sessionId));
-  if (modesOff.length === 2 && modesOff[0] === true && modesOff[1] === false) ok(`durable state folded to ${JSON.stringify(modesOff)}`);
-  else fail(`expected ask/mode [true,false], saw ${JSON.stringify(modesOff)}`);
+  const runsAfterOff = (await sessionEvents(sessionId)).filter((event) => event.type === 'command/run' && event.data.name === 'ask');
+  if (runsAfterOff.length === 4) ok(`the log holds ${runsAfterOff.length} /ask records, and the state is derived from them`);
+  else fail(`expected 4 /ask command records, saw ${runsAfterOff.length}`);
 
   // ── optional real model turns ──────────────────────────────────────────────
 
@@ -237,11 +254,12 @@ async function main() {
     else ok(`ask mode did not create ${options.probeFile}${denied ? ' (the guard denied the write)' : ' (the model declined to act)'}`);
 
     const afterTurn = await liveState(sessionId);
-    const modesAfterTurn = modeValues(await sessionEvents(sessionId));
+    const eventsAfterTurn = await sessionEvents(sessionId);
     if (afterTurn.values.ask?.active === false) ok('ask mode ended with its turn, with no /ask off');
     else fail(`ask mode outlived its turn: ${JSON.stringify(afterTurn.values.ask)}`);
-    if (modesAfterTurn.at(-1) === false) ok(`the durable state ends at ${JSON.stringify(modesAfterTurn)}`);
-    else fail(`expected the last ask/mode value to be false, saw ${JSON.stringify(modesAfterTurn)}`);
+    const endsWithTurnEnd = eventsAfterTurn.filter((event) => event.type === 'turn/end').length > 0;
+    if (endsWithTurnEnd) ok('the release is the turn/end event the harness itself logged');
+    else fail('the ask turn logged no turn/end event');
 
     // Turn 2: an ordinary message — no /ask, no /ask off — must be able to act.
     await call('session/prompt', {

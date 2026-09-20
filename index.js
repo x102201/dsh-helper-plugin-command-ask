@@ -54,16 +54,18 @@ import { PLUGIN_NAME, resolveConfig } from './lib/config.js';
 import { createModeController } from './lib/controller.js';
 import { createReadOnlyGuard } from './lib/guard.js';
 import { createUserMessage } from './lib/message.js';
-import { ASK_PROJECTION_KEY, askProjectionDefinition } from './lib/projection.js';
+import { ASK_PROJECTION_KEY, createAskProjection } from './lib/projection.js';
 
 /** Stable Cordis plugin name; also the row id in `cordis.patch.yml`. */
 export const name = PLUGIN_NAME;
 
 /**
  * Services required before the mode can be wired. `commands` is optional (a
- * UI-less profile composes no command surface) and is injected inside `apply`.
+ * UI-less profile composes no command surface) and is injected inside `apply`;
+ * `sessions` provides the durability checkpoint that makes a mode switch durable
+ * immediately instead of at the next ordinary checkpoint.
  */
-export const inject = ['tools', 'systemPrompt', 'sessionProjections'];
+export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'sessions'];
 
 /** The prompt section a deployment overrides with `config.section`. */
 export const SECTION_NAME = 'ask:policy';
@@ -89,43 +91,19 @@ export function apply(ctx, rawConfig) {
     warn: (message) => ctx.logger.warn('%s: %s', PLUGIN_NAME, message),
   });
 
-  // ── step boundary ─────────────────────────────────────────────────────────
-  // A selection made mid-turn is appended here, at the only append point while
-  // an agent runs. The notice is built before the append because the append is
-  // what clears the selection, and it rides the admitted step's messages so the
-  // model sees the switch in the request it applies to. A rejected step or an
-  // aborted turn leaves the selection pending for the next boundary.
+  // ── the switch notice ─────────────────────────────────────────────────────
+  // `/ask` and `/ask off` change the mode as soon as their command record
+  // settles; `turn/end` releases a one-turn mode. All of that lives in the log
+  // fold, so the only work left at the step boundary is telling the model that
+  // the mode it was last told about has changed (`scope: session`; off by
+  // default in the one-turn scope, which has no standing stance to correct). A
+  // rejected step or an aborted turn simply skips the notice.
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const decision = await next();
-    const pending = controller.pendingOf(agent.session);
-    if (decision.kind === 'reject' || signal.aborted || pending === undefined) return decision;
-    const narration = controller.narrate(agent.session, pending.active);
-    try {
-      controller.applyBoundary(agent.session);
-    } catch (error) {
-      // A failed append must never block the turn; the selection stays pending.
-      ctx.logger.warn('%s: failed to append the selected ask mode at the step boundary: %o', PLUGIN_NAME, error);
-      return decision;
-    }
+    if (decision.kind === 'reject' || signal.aborted) return decision;
+    const narration = controller.narrationFor(agent.session);
     return narration === undefined ? decision : { ...decision, messages: [...decision.messages, narration] };
   });
-
-  // ── the turn boundary that ends a turn-scoped mode ────────────────────────
-  // `/ask <question>` answers one question read-only; it is not a session
-  // stance, so the mode is logged off when the turn that consumed it stops.
-  // A later message without /ask is then ordinary work again, with no `/ask off`
-  // needed. `agent/turn-stopping` is awaited before the boundary commits, so the
-  // off-value is in the log before any later request is assembled. A failure
-  // here is contained: it must never break turn closing.
-  if (config.scope === 'turn') {
-    ctx.on('agent/turn-stopping', ({ agent }) => {
-      try {
-        controller.disarm(agent.session);
-      } catch (error) {
-        ctx.logger.warn('%s: failed to end ask mode at the turn boundary: %o', PLUGIN_NAME, error);
-      }
-    });
-  }
 
   // ── guidance ──────────────────────────────────────────────────────────────
   // The section is registered once, permanently, and renders '' while ask mode
@@ -137,17 +115,34 @@ export function apply(ctx, rawConfig) {
     text: (context) => {
       const agent = context.agent;
       if (agent === undefined) return '';
-      return controller.effectiveActive(agent.session) ? config.section : '';
+      return controller.loggedActive(agent.session) ? config.section : '';
     },
   });
 
   // ── durable state ─────────────────────────────────────────────────────────
-  ctx.sessionProjections.register(askProjectionDefinition);
+  // The `ask` unit folds `/ask` command records and turn ends out of the log, so
+  // the plugin writes no session-event vocabulary of its own.
+  ctx.sessionProjections.register(createAskProjection({ scope: config.scope }));
+
+  // A mode switch is a human-visible control, so make it durable as soon as the
+  // projection changes rather than at the next ordinary checkpoint: a `/ask`
+  // followed by a hard stop would otherwise leave the switch only in memory.
+  // `ctx.sessions.flush()` is the harness's own flush entry point (checkpoint
+  // policy, goal driver, and message feedback all use it). The flush is deferred
+  // out of the change notification, which runs inside the appending publication.
+  ctx.sessionProjections.onChanged((session, key) => {
+    if (key !== ASK_PROJECTION_KEY) return;
+    queueMicrotask(() => {
+      ctx.sessions.flush(session).catch((error) => {
+        ctx.logger.warn('%s: could not checkpoint the ask-mode switch: %o', PLUGIN_NAME, error);
+      });
+    });
+  });
 
   // ── enforcement ───────────────────────────────────────────────────────────
   if (config.enforce) {
     ctx.tools.guard(createReadOnlyGuard({
-      effectiveActive: (session) => controller.effectiveActive(session),
+      effectiveActive: (session) => controller.loggedActive(session),
       blockedTools: config.blockedTools,
       allowedTools: config.allowedTools,
       plugin: PLUGIN_NAME,
@@ -168,15 +163,29 @@ export function apply(ctx, rawConfig) {
   });
 
   // ── programmatic control ──────────────────────────────────────────────────
+  const commands = ctx.get('commands');
   try {
     ctx.provide('askMode', Object.freeze({
       /** Projection key holding the durable state. */
       projectionKey: ASK_PROJECTION_KEY,
-      /** Logged state plus any pending selection. */
+      /** Logged state, plus `pending` while an invocation is in flight. */
       get: (agent) => controller.get(agent),
-      /** Select the mode; see `lib/controller.js` for the outcomes. */
-      set: (agent, active) => controller.set(agent, active),
-      /** Whether ask mode is logged on for a session. */
+      /**
+       * Select the mode by running the real command, so the switch is a durable
+       * `/ask` record like any other and the log stays the single source of
+       * truth. Requires a composed commands service.
+       *
+       * @param {object} agent - the agent to switch.
+       * @param {boolean} active - the requested state.
+       * @returns {Promise<object>} the settled command result.
+       */
+      set: async (agent, active) => {
+        if (commands === undefined) throw new Error('ctx.askMode.set requires the commands service; a UI-less profile can still drive /ask through its own adapter');
+        const settled = await commands.execute(agent, active ? '/ask' : '/ask off', [], new AbortController().signal);
+        if (settled === undefined) throw new Error('the /ask command is not registered');
+        return settled.result;
+      },
+      /** Whether ask mode is on for a session. */
       isActive: (session) => controller.loggedActive(session),
     }));
   } catch (error) {
@@ -197,6 +206,12 @@ export function apply(ctx, rawConfig) {
 /**
  * Implement `/ask`, `/ask off`, and `/ask <message>`.
  *
+ * The handler owns admission and the reply text; the durable state change is the
+ * command record itself, which the `ask` projection folds once this returns. So
+ * the outcome is computed from the state the invocation started in: an
+ * invocation that does not change the mode is a no-op, and one that does is
+ * committed by the registry's own `command/done`.
+ *
  * @param {object} input - the invocation and its collaborators.
  * @returns {object} the command result rendered by the dispatching UI.
  */
@@ -209,17 +224,15 @@ function handleAskCommand({ agent, rawInput, attachments, controller, config }) 
     return { kind: 'error', text: 'Attachments cannot accompany /ask off.' };
   }
 
+  const wanted = message !== 'off';
+  const wasActive = controller.loggedActive(agent.session);
+
   if (message === 'off') {
-    const { outcome } = controller.set(agent, false);
-    if (outcome === 'committed') return { kind: 'success', text: 'Ask mode off.' };
-    if (outcome === 'queued') return { kind: 'success', text: 'Leaving ask mode (applies from the next step).' };
-    if (outcome === 'cancelled') return { kind: 'success', text: 'Ask mode entry cancelled.' };
-    return controller.loggedActive(agent.session)
-      ? { kind: 'success', text: 'Leaving ask mode (applies from the next step).' }
-      : { kind: 'success', text: 'Ask mode is already off.' };
+    if (!wasActive) return { kind: 'success', text: 'Ask mode is already off.' };
+    return { kind: 'success', text: 'Ask mode off.' };
   }
 
-  const { outcome, supersededPlan } = controller.set(agent, true);
+  const supersededPlan = wasActive ? false : controller.supersedePlan(agent.session);
 
   // The optional message becomes an ordinary logged user message under the mode
   // guidance; admitted attachments keep the user's selection order.
@@ -234,18 +247,16 @@ function handleAskCommand({ agent, rawInput, attachments, controller, config }) 
   }
 
   const planNote = supersededPlan ? ' Plan mode was switched off.' : '';
-  if (turnScoped) {
-    if (outcome === 'committed') return { kind: 'success', text: `Ask mode on (read-only) for one turn. The answer comes back read-only; a later message without /ask runs normally.${planNote}` };
-    if (outcome === 'queued') return { kind: 'success', text: 'Entering ask mode for the rest of this turn (applies from the next step).' };
-    if (outcome === 'cancelled') return { kind: 'success', text: 'Ask mode stays on for this turn.' };
+  if (wasActive) {
     return message === '' && attachments.length === 0
-      ? { kind: 'success', text: `Ask mode is already on; it ends with the current turn.${config.enforce ? '' : ' (enforcement is off)'}` }
-      : { kind: 'success', text: 'Ask mode is already on; answering your message read-only.' };
+      ? { kind: 'success', text: `Ask mode is already on; ${turnScoped ? 'it ends with the current turn' : 'use /ask off to leave'}.${config.enforce ? '' : ' (enforcement is off)'}` }
+      : { kind: 'success', text: `Ask mode is already on; answering your message read-only.${config.enforce ? '' : ' (enforcement is off)'}` };
   }
-  if (outcome === 'committed') return { kind: 'success', text: `Ask mode on (read-only). Use /ask off to leave.${planNote}` };
-  if (outcome === 'queued') return { kind: 'success', text: 'Entering ask mode (applies from the next step). Use /ask off to leave.' };
-  if (outcome === 'cancelled') return { kind: 'success', text: 'Ask mode stays on.' };
-  return message === '' && attachments.length === 0
-    ? { kind: 'success', text: `Ask mode is already on. Use /ask off to leave.${config.enforce ? '' : ' (enforcement is off)'}` }
-    : { kind: 'success', text: 'Ask mode is already on; sending your message under ask mode.' };
+  if (turnScoped) {
+    return {
+      kind: 'success',
+      text: `Ask mode on (read-only) for one turn. The answer comes back read-only; a later message without /ask runs normally.${planNote}`,
+    };
+  }
+  return { kind: 'success', text: `Ask mode on (read-only). Use /ask off to leave.${planNote}` };
 }

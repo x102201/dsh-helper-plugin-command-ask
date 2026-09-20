@@ -19,14 +19,35 @@ An **`/ask` collaboration mode** for [DeepSeek Harness](https://github.com/deeps
 | Piece | Behavior |
 |---|---|
 | `/ask` command | Arms ask mode, optionally with the trailing question (images/files allowed). `<scope: turn>` covers one turn; `session` (config) keeps the `/plan`-like standing stance until `/ask off`. |
-| Turn boundary | A turn-scoped mode is logged off by an `agent/turn-stopping` listener, so the next request is assembled without it — no `/ask off` needed. |
+| Turn boundary | A turn-scoped mode is released by the harness's own `turn/end` event, so the next request is assembled without it — no `/ask off` needed. |
 | `ask:policy` prompt section | Renders the deployment's guidance on every request while the mode is active, and nothing while it is off. |
-| Durable state | One whole-value `ask/mode` event per switch in the session log, folded by an `ask` session-projection unit: resume, fork, and compaction recover the mode. |
+| Durable state | The `ask` projection folds the `/ask` `command/run`/`command/done` records and `turn/end` out of the session log. The plugin writes **no session-event vocabulary of its own**, and each switch is checkpointed through `ctx.sessions.flush()` so it survives a restart. |
 | Read-only guard | On by default: a monotonic `ctx.tools.guard()` denies the configured mutating tools while ask mode is active, and tells the model to answer from what it can inspect. |
 | Plan-mode handoff | Only with `scope: session`: entering a standing ask mode leaves plan mode, so two contradictory stances are never active at once. |
-| Programmatic control | Provides `ctx.askMode` with `get(agent)`, `set(agent, active)`, `isActive(session)`. |
+| Programmatic control | Provides `ctx.askMode` with `get(agent)`, `set(agent, active)` (dispatches the real command), `isActive(session)`. |
 
-Each ask turn is a fresh, self-contained stance: the guidance is present exactly in the requests it governs, and the `ask/mode` log records every switch.
+Each ask turn is a fresh, self-contained stance: the guidance is present exactly in the requests it governs, and the log records every switch as an ordinary `/ask` command record.
+
+> ### Upgrading from 0.1.x
+>
+> 0.1.x persisted the mode as its own session event type, `ask/mode`. An
+> out-of-tree plugin cannot add to the harness vocabulary — `Session.append()`
+> cannot set the envelope's `ignorable` marker, so the persistence reader refuses
+> a log containing such an event (*"unknown to this harness and not marked
+> ignorable; refusing to interpret the log"*) and **every session that had ever
+> run `/ask` became unloadable**. 0.2.0 writes no such event, and
+> [`scripts/repair-ask-mode-logs.mjs`](scripts/repair-ask-mode-logs.mjs) marks the
+> leftover records ignorable in place (dropping them would break the log's
+> required dense seq numbering):
+>
+> ```sh
+> node scripts/repair-ask-mode-logs.mjs --sessions <DSH_HOME>/sessions                # dry run
+> node scripts/repair-ask-mode-logs.mjs --sessions <DSH_HOME>/sessions --apply --backup <dir>
+> ```
+>
+> The projection's `stateVersion` moved to 2, so a cached row from 0.1.x is
+> discarded and the state is refolded from the command records — no further
+> migration is needed.
 
 ## Install
 
@@ -145,27 +166,26 @@ It is a **deny** list on purpose: an unknown tool — a deployment's MCP tool, a
 ## How it works
 
 ```text
-/ask ──► ctx.commands.register('ask')  ─┐
-                                        ├──► session.append('ask/mode', { active: true })
-agent/pre-step waterfall ───────────────┘         │
-                                                  ▼
-                              ctx.sessionProjections unit 'ask'  ──►  view { active, pending }
-                                                  │
-                          ┌───────────────────────┴────────────────────────┐
-                          ▼                                                ▼
-       ctx.systemPrompt.section('ask:policy')              ctx.tools.guard(read-only)
-       (guidance on every request while active)            (deny mutating tools while active)
-
-agent/turn-stopping (scope: turn) ──► session.append('ask/mode', { active: false })
+/ask ──► ctx.commands.register('ask')  ──► session.append('command/run' | 'command/done')
+                                                        │
+                                                        ▼
+                                    ctx.sessionProjections unit 'ask'
+                                    folds /ask records + turn/end  ──►  view { active, pending }
+                                                        │
+                          ┌─────────────────────────────┴──────────────────────────┐
+                          ▼                                                        ▼
+       ctx.systemPrompt.section('ask:policy')                  ctx.tools.guard(read-only)
+       (guidance on every request while active)                (deny mutating tools while active)
 ```
 
-- **Durable state is the log.** `ask/mode` is a whole-value event; the `ask` projection folds it (it also folds `/ask` `command/run`/`command/done` pairs into a `pending` flag). State therefore survives resume, fork, and compaction with no live mirror to keep in sync. Projection `stateVersion: 1`.
-- **Step-boundary appends.** Between turns a selection is appended immediately. During an open turn it stays pending until the next accepted in-turn `agent/pre-step` — the only append point while an agent runs — so a switch is never logged in the middle of a step it does not apply to. A rejected step, an aborted turn, or a failed append leaves the selection pending.
-- **Turn-scoped exit.** The default `scope: turn` logs `ask/mode { active: false }` from an `agent/turn-stopping` listener, which the loop awaits before it commits the turn boundary. The next request is therefore assembled with no `ask:policy` section and no guard, which is what makes "ask a question, then say 'do it'" work without `/ask off`. A failure there is contained and never breaks turn closing.
+- **The durable state is the command record.** `/ask` is a command, and the command registry already logs `command/run` + `command/done` for it — the mode is a pure fold over those records plus the harness's `turn/end` and `request/header` events. Resume, fork, and compaction recover the mode by replaying the log, and there is no live mirror to keep in sync.
+- **No vocabulary of its own.** A plugin outside the harness repository cannot add a session event type: `Session.append()` cannot set the envelope's `ignorable` marker, and the persistence read path refuses an unknown type that lacks it. Everything here is expressed in events the harness already knows, so a session log stays readable by any harness — with or without this plugin loaded. `test/plugin.test.mjs` asserts the log holds nothing else.
+- **Immediate durability.** The projection's change feed calls `ctx.sessions.flush(session)` (the harness's own checkpoint entry point) so a switch reaches disk in well under a second instead of waiting for the next model request.
+- **Turn-scoped release.** With the default `scope: turn`, the harness's own `turn/end` record ends the mode; the next request is assembled with no `ask:policy` section and no guard. That is what makes "ask a question, then say 'do it'" work without `/ask off`.
 - **Prompt stability.** The section is registered once and returns `''` while the mode is off, so entering or leaving a mode never changes the request's tool catalog. This is why the mode can be enforced by a guard instead of by hiding tools.
-- **Narration** (`scope: session` only). When a logged switch changes what the last `request/header` described, one plugin-sourced notice is injected (`agent.inject` between turns, the admitted step's messages mid-turn), so the model is not left reasoning under the old stance. A one-turn mode needs none: the guidance is present exactly in the turn it governs.
+- **Narration** (`scope: session` only). When the last `request/header` described a different mode than the one now in effect, one plugin-sourced notice rides the next admitted step, so the model is not left reasoning under the old stance. A one-turn mode needs none: the guidance is present exactly in the turn it governs.
 - **Enforcement seam.** `ctx.tools.guard()` is monotonic and runs after the `tools/pre-execute` waterfall: a denial cannot be overridden by another listener, and it covers nested `run_code` sub-dispatches too (the tool registry propagates the calling agent into sub-dispatches).
-- **Plan-mode handoff** (`scope: session` only): a standing ask mode is strictly narrower than plan mode, so entering one leaves the other. The plugin writes plan mode's own durable `plan/mode` event rather than calling a service: no realm crossing, and the fold recovers the result like any other mode change. With plan mode not composed, the check reads an absent projection and does nothing.
+- **Plan-mode handoff** (`scope: session` only): a standing ask mode is strictly narrower than plan mode, so entering one leaves the other. The plugin writes plan mode's own known `plan/mode` event rather than calling a service: no realm crossing, and the fold recovers the result like any other switch. With plan mode not composed, the check reads an absent projection and does nothing.
 
 ### Differences from `/plan`
 
@@ -193,13 +213,13 @@ Written against **dsh `0.1.5-rc.2`**. Services and seams used, all host-plane:
 
 | Seam | Purpose |
 |---|---|
-| `ctx.commands.register()` (optional injection — a UI-less profile still gets the mode) | the `/ask` command |
+| `ctx.commands.register()` (optional injection — a UI-less profile still gets the mode) | the `/ask` command, whose records are the durable state |
 | `ctx.systemPrompt.section()` + `getSectionOrder('PLAN_POLICY')` | the `ask:policy` section |
-| `ctx.sessionProjections.register()` / `stateOf()` | the `ask` unit and the `plan`/`turnBoundary` reads |
+| `ctx.sessionProjections.register()` / `stateOf()` / `onChanged()` | the `ask` unit, the `plan`/`turnBoundary` reads, and the checkpoint trigger |
+| `ctx.sessions.flush()` | making a switch durable immediately |
 | `ctx.tools.guard()` | the read-only denial |
-| `ctx.on('agent/pre-step')`, `agent.steer()`, `agent.inject()` | pending commits, the steered question, narration |
-| `ctx.on('agent/turn-stopping')` | the turn-scoped exit |
-| `session.append()`, `ctx.provide('askMode')` | durable state and programmatic control |
+| `ctx.on('agent/pre-step')`, `agent.steer()` | the `scope: session` switch notice, and steering the trailing question |
+| `session.append()` (only `plan/mode`), `ctx.provide('askMode')` | the plan handoff and programmatic control |
 | projection `stateSchema`/`viewSchema` | a tiny `parse`-compatible validator, not `zod` |
 
 Two deliberate soft spots, so that a missing shoulder does not break a boot: an absent `ask`/`plan` projection reads as "off", and an absent `turnBoundary` projection means "no open turn" (with one warning). The plugin also imports **no bare specifier at all** — that is what makes `link:` and `github:` installs behave identically (Node resolves a linked package's imports from its real path, outside the profile's `node_modules`). `test/package.test.mjs` enforces that property.
@@ -213,7 +233,7 @@ npm test              # node --test
 npm run test:direct   # one process instead (for sandboxes that block the runner's child processes)
 ```
 
-82 tests cover the config validation (including the `scope` defaults), the projection fold and its schemas, the mode state machine (commit / queue / cancel / no-op, boundary appends, failed appends, plan-mode supersession, narration, the turn-scoped `disarm`), the guard, the package's installability properties, and the plugin's wiring over a fake Cordis tree — including ask turns that end on their own boundary, several of them in a row, and a log replay after resume.
+82 tests cover the config validation (including the `scope` defaults), the projection fold and its schemas, the read-side mode helpers and the plan handoff, the guard, the package's installability properties, and the plugin's wiring over a fake Cordis tree — including ask turns that end on their own, several in a row, the immediate checkpoint on a switch, the `ctx.askMode.set` path through the real command, and a replay of the mode after a resume.
 
 ### Verification status
 
@@ -223,31 +243,19 @@ Every layer below was run; the live ones used a scratch `$DSH_HOME` and an isola
 2. **Package shape** — static tests pin the property both install methods depend on: the runtime imports no bare specifier (a `link:` install cannot resolve one, because Node resolves a linked package's imports from its real path) and the package ships no install-time script pnpm would have to allowlist.
 3. **The install commands** — against scratch profiles, with dsh `0.1.5-rc.2` and pnpm 12.5.1:
    - `dsh plugin --profile web add link:<absolute checkout>` → initialized the profile, linked the checkout, and the reconciler appended `dsh-helper-plugin-command-ask` to `dsh.profile.bundles` on its own.
-   - `pnpm pack` → 24 files / 41.5 KB (no `node_modules`, no `.git`), then `dsh plugin --profile web add <tarball>` → the same reconciliation and the same composed row.
+   - `pnpm pack` → 24 files, then `dsh plugin --profile web add <tarball>` → the same reconciliation and the same composed row.
    - `git clone --bare` of this repository, then `dsh plugin --profile web add git+file://<bare repo>` → same reconciliation, same row. This is pnpm's git fetcher, i.e. the `github:` code path with a local transport.
    In every case `--dump-config` composed `id: command-ask` with the name anchored inside the installed copy, and `--port 0 --no-open` activated and served the UI.
-4. **Activation in a real tree** — `scripts/verify-profile.ps1 -Probe` prints markers from inside `apply()`: the row reached the active state (dsh fails loudly on any entry that does not), and `apply()` ran with `commands`, `tools`, `systemPrompt`, and `sessionProjections` all resolved, so the `ctx.inject(['commands'], …)` callback that registers `/ask` executed.
-5. **Live behavior, including real model turns** — `scripts/verify-live.mjs --model-turns` against a running web instance, on the turn-scoped default: **22/22 checks passed**.
+4. **Activation in a real tree** — `scripts/verify-profile.ps1 -Probe` prints markers from inside `apply()`: the row reached the active state (dsh fails loudly on any entry that does not), and `apply()` ran with `commands`, `tools`, `systemPrompt`, `sessionProjections`, and `sessions` all resolved, so the `ctx.inject(['commands'], …)` callback that registers `/ask` executed.
+5. **Live behavior, including real model turns** — `scripts/verify-live.mjs --model-turns` against a running web instance, on the turn-scoped default: **22/22 checks passed**, including *"every event in the log belongs to the harness vocabulary (no plugin-defined types)"*, *"ask mode ended with its turn, with no /ask off"* and *"the next message without /ask created the file"*.
+6. **Restart and resume** — the same environment was restarted (hard kill included) with sessions that had run `/ask`: they load again (`session/page` returns their records) and the mode is recovered from the log. An armed-but-unrun `/ask` also survives a hard restart, because the switch is checkpointed on the spot:
 
    ```text
-   ok: the ask turn’s system prompt carried the ask-mode guidance
-   ok: ask mode did not create ask-mode-probe-turn.txt
-   ok: ask mode ended with its turn, with no /ask off
-   ok: the durable state ends at [true,false,true,false]
-   ok: the next message without /ask created ask-mode-probe-turn.txt
-   ok: and its request carried no ask-mode guidance
+   session-8d4ba696 … : 6 renderable records after the restart
+     seq 3 command/run name=ask args=""
+     seq 4 command/done kind=success
+   ask before paging : {"active":true,"pending":false}
    ```
-
-   A separate live probe asked the same instance to run `git status` under `/ask`; the model called `pwsh` three times and every call came back denied, after which it answered from `glob`/`read` instead:
-
-   ```text
-   Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the "pwsh" tool is
-   blocked for this turn. Answer from what you can inspect instead, and tell the user to
-   send the change as a normal message (without /ask), or to run /ask off to leave ask
-   mode early.
-   ```
-
-   So the mode — not the sandbox — is what changed the outcome, and it released itself at the turn boundary.
 
 Not covered: the Web composer round-trip through a browser (there is no client half — feedback is the command result text and, for `scope: session`, the switch notice). Everything the command surface can reach is covered above.
 
@@ -266,6 +274,7 @@ examples/                    profile patch, portable --patch overlay, agent-pres
 scripts/run-tests.mjs        single-process test runner
 scripts/verify-profile.ps1   scratch-profile verification against a real dsh (--dump-config + boot + -Probe)
 scripts/verify-live.mjs      live verification against a running instance (HTTP RPC; --model-turns)
+scripts/repair-ask-mode-logs.mjs    repairs logs written by 0.1.x (marks the stray records ignorable)
 test/                        the suite (config, projection, controller, guard, wiring, package shape)
 test-support/harness.mjs     the fake-Cordis tree the wiring tests drive
 README.md / README.zh.md     the reference in English and Chinese

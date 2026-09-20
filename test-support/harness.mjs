@@ -33,6 +33,7 @@ export function createFakeProjections() {
   const units = new Map();
   const statics = new Map();
   const cells = new WeakMap();
+  const changeListeners = new Set();
 
   function cellFor(session, unit) {
     let perSession = cells.get(session);
@@ -70,12 +71,23 @@ export function createFakeProjections() {
     setStatic(key, state) {
       statics.set(key, state);
     },
-    /** Fold one committed event through every registered unit. */
+    /** Fold one committed event through every registered unit, then notify. */
     drive(session, event) {
       for (const unit of units.values()) {
         const cell = cellFor(session, unit);
+        const before = unit.wire === undefined ? undefined : unit.wire.view(cell.state);
         cell.state = unit.apply(cell.state, event);
+        if (unit.wire === undefined) continue;
+        const after = unit.wire.view(cell.state);
+        // The real registry publishes only when the raw view changes by identity.
+        if (Object.is(before, after)) continue;
+        for (const listener of changeListeners) listener(session, unit.key, after, event.seq);
       }
+    },
+    /** The registry's change feed, as `ctx.sessionProjections.onChanged`. */
+    onChanged(listener) {
+      changeListeners.add(listener);
+      return () => changeListeners.delete(listener);
     },
     get units() {
       return units;
@@ -148,6 +160,21 @@ export function createFakeCtx(options = {}) {
   const warnings = [];
   const provided = {};
   const effects = [];
+  const flushes = [];
+
+  /** The composed commands service: registration plus the real dispatch shape. */
+  const commandsService = {
+    register: (definition) => commands.push(definition),
+    /**
+     * The real dispatcher settles a `CommandExecution` (`{commandId, result}`)
+     * after appending the same lifecycle events around the handler.
+     */
+    execute: async (agent, line, attachments = [], signal = new AbortController().signal) => {
+      const result = await executeCommand(ctx, agent, line, attachments, signal);
+      const done = agent.session.eventsOfType('command/done').at(-1);
+      return { commandId: done?.data.commandId, result };
+    },
+  };
 
   const ctx = {
     projections,
@@ -157,6 +184,7 @@ export function createFakeCtx(options = {}) {
     warnings,
     provided,
     effects,
+    flushes,
     logger: {
       info: () => {},
       warn: (...args) => warnings.push(args.map(String).join(' ')),
@@ -171,10 +199,17 @@ export function createFakeCtx(options = {}) {
     /** Faithful in result, simplified in timing: the real one settles a tick later. */
     inject(names, callback) {
       const wanted = Array.isArray(names) ? names : [names];
-      if (wanted.includes('commands') && withCommands) {
-        callback({ commands: { register: (definition) => commands.push(definition) } });
-      }
+      if (wanted.includes('commands') && withCommands) callback({ commands: commandsService });
       return () => {};
+    },
+    /** Service lookup, as `ctx.get(name)` on the real context. */
+    get(name) {
+      if (name === 'commands') return withCommands ? commandsService : undefined;
+      if (name === 'tools') return ctx.tools;
+      if (name === 'systemPrompt') return ctx.systemPrompt;
+      if (name === 'sessionProjections') return ctx.sessionProjections;
+      if (name === 'sessions') return ctx.sessions;
+      return undefined;
     },
     effect(callback) {
       effects.push(callback);
@@ -198,6 +233,15 @@ export function createFakeCtx(options = {}) {
     sessionProjections: {
       register: (definition) => projections.register(definition),
       stateOf: (session, key) => projections.stateOf(session, key),
+      /** The registry's change feed: one call per changed client-visible unit. */
+      onChanged: (listener) => projections.onChanged(listener),
+    },
+    /** The session store: `flush` is the durability checkpoint the plugin uses. */
+    sessions: {
+      flush: async (session) => {
+        flushes.push(session);
+        return true;
+      },
     },
     /** Run every recorded `agent/pre-step` listener as the loop's waterfall does. */
     async runPreStep(agent, { decision = { kind: 'enter', messages: [] }, signal = new AbortController().signal } = {}) {
@@ -211,11 +255,12 @@ export function createFakeCtx(options = {}) {
       };
       return next();
     },
-    /** Dispatch `agent/turn-stopping` as the loop does before the boundary commits. */
-    runTurnStopping(agent) {
-      for (const handler of listeners.get('agent/turn-stopping') ?? []) {
-        handler({ agent, turn: 1, signal: new AbortController().signal });
-      }
+    /**
+     * Close a turn the way the agent loop does: append `turn/end`. Ask mode's
+     * one-turn scope is released by that event, not by a plugin listener.
+     */
+    runTurnEnd(agent, reason = { kind: 'completed' }) {
+      agent.session.append('turn/end', { turn: 1, reason });
     },
     /** The registered `/ask` definition, when the commands service was composed. */
     command(name) {
@@ -233,9 +278,10 @@ export function createFakeCtx(options = {}) {
  * @param {object} agent - the receiving agent.
  * @param {string} line - the full command line, e.g. `/ask off`.
  * @param {object[]} [attachments] - admitted attachment blocks.
+ * @param {AbortSignal} [signal] - the dispatching caller's signal.
  * @returns {Promise<object>} the settled result.
  */
-export async function executeCommand(ctx, agent, line, attachments = []) {
+export async function executeCommand(ctx, agent, line, attachments = [], signal = new AbortController().signal) {
   const space = line.indexOf(' ');
   const name = space === -1 ? line.slice(1) : line.slice(1, space);
   const rawInput = space === -1 ? '' : line.slice(space + 1);
@@ -245,13 +291,7 @@ export async function executeCommand(ctx, agent, line, attachments = []) {
   agent.session.append('command/run', { commandId, name, args: rawInput, source: { kind: 'user' } });
   let result;
   try {
-    result = await definition.handler({
-      commandId,
-      agent,
-      rawInput,
-      attachments,
-      signal: new AbortController().signal,
-    });
+    result = await definition.handler({ commandId, agent, rawInput, attachments, signal });
   } catch (error) {
     result = { kind: 'error', text: String(error) };
   }

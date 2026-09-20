@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ASK_MODE_EVENT, askProjectionDefinition } from '../lib/projection.js';
+import { ASK_PROJECTION_KEY, ASK_PROJECTION_STATE_VERSION, createAskProjection } from '../lib/projection.js';
 import { askStateSchema, askViewSchema } from '../lib/schema.js';
 
-const { init, apply, wire } = askProjectionDefinition;
+const turnUnit = createAskProjection({ scope: 'turn' });
+const sessionUnit = createAskProjection({ scope: 'session' });
 
 /** Fold a list of events from the empty log. */
-function fold(events) {
-  return events.reduce((state, event) => apply(state, event), init());
+function fold(unit, events) {
+  return events.reduce((state, event) => unit.apply(state, event), unit.init());
 }
 
 /** One event with the fields the fold reads. */
@@ -16,115 +17,123 @@ function event(type, data) {
   return { type, seq: 0, time: 0, data };
 }
 
-test('the unit declares the key, a version, and both schemas', () => {
-  assert.equal(askProjectionDefinition.key, 'ask');
-  assert.equal(askProjectionDefinition.stateVersion, 1);
-  assert.equal(askProjectionDefinition.stateSchema, askStateSchema);
-  assert.equal(wire.viewSchema, askViewSchema);
-  assert.ok(Object.isFrozen(askProjectionDefinition));
+/** The command record pair the registry appends around one `/ask` run. */
+function askRun({ id = 'c1', args = '', kind = 'success' } = {}) {
+  return [
+    event('command/run', { commandId: id, name: 'ask', args }),
+    event('command/done', { commandId: id, kind, text: kind === 'success' ? 'ok' : 'boom' }),
+  ];
+}
+
+test('the unit declares the key, the bumped version, and both schemas', () => {
+  assert.equal(turnUnit.key, 'ask');
+  assert.equal(ASK_PROJECTION_KEY, 'ask');
+  assert.equal(turnUnit.stateVersion, 2);
+  assert.equal(ASK_PROJECTION_STATE_VERSION, 2, 'the fold changed, so cached v1 rows must be discarded');
+  assert.equal(turnUnit.stateSchema, askStateSchema);
+  assert.equal(turnUnit.wire.viewSchema, askViewSchema);
+  assert.ok(Object.isFrozen(turnUnit));
 });
 
-test('the empty log is inactive with no selection and no header yet', () => {
-  assert.deepEqual(init(), { active: false, wanted: null, running: null, activeAtLastHeader: null });
+test('the empty log is inactive with no invocation and no header yet', () => {
+  assert.deepEqual(turnUnit.init(), { active: false, running: null, activeAtLastHeader: null });
 });
 
 test('unrelated events keep the state reference', () => {
-  const state = init();
-  for (const unrelated of ['tool/result', 'step/start', 'assistant/message']) {
-    assert.equal(apply(state, event(unrelated, {})), state);
+  const state = turnUnit.init();
+  for (const unrelated of ['tool/result', 'step/start', 'assistant/message', 'plan/mode']) {
+    assert.equal(turnUnit.apply(state, event(unrelated, {})), state);
   }
-  assert.equal(apply(state, event('command/run', { commandId: 'c1', name: 'goal', args: '' })), state);
+  assert.equal(turnUnit.apply(state, event('command/run', { commandId: 'c', name: 'goal', args: '' })), state);
 });
 
-test('ask/mode is a whole-value event that clears any selection', () => {
-  const state = fold([
-    event('command/run', { commandId: 'c1', name: 'ask', args: '' }),
-    event('command/done', { commandId: 'c1', kind: 'success', text: 'on' }),
-    event(ASK_MODE_EVENT, { active: true }),
-  ]);
-  assert.deepEqual(state, { active: true, wanted: null, running: null, activeAtLastHeader: null });
+test('a settled /ask run turns the mode on, and /ask off turns it off', () => {
+  const on = fold(turnUnit, askRun());
+  assert.equal(on.active, true);
+  assert.equal(on.running, null);
+  assert.deepEqual(turnUnit.wire.view(on), { active: true, pending: false });
+
+  const off = fold(turnUnit, [...askRun(), ...askRun({ id: 'c2', args: 'off' })]);
+  assert.equal(off.active, false);
+  assert.deepEqual(turnUnit.wire.view(off), { active: false, pending: false });
 });
 
-test('a settled /ask run folds into a pending selection only while it differs', () => {
-  const turnedOn = fold([
-    event('command/run', { commandId: 'c1', name: 'ask', args: '' }),
-    event('command/done', { commandId: 'c1', kind: 'success' }),
-  ]);
-  assert.equal(turnedOn.wanted, true);
-  assert.deepEqual(wire.view(turnedOn), { active: false, pending: true });
-
-  const redundant = fold([
-    event(ASK_MODE_EVENT, { active: true }),
-    event('command/run', { commandId: 'c2', name: 'ask', args: '' }),
-    event('command/done', { commandId: 'c2', kind: 'success' }),
-  ]);
-  assert.equal(redundant.wanted, null);
-  assert.deepEqual(wire.view(redundant), { active: true, pending: false });
+test('an invocation in flight is visible as pending and changes nothing yet', () => {
+  const state = fold(turnUnit, [event('command/run', { commandId: 'c1', name: 'ask', args: '' })]);
+  assert.deepEqual(state.running, { commandId: 'c1', wanted: true });
+  assert.equal(state.active, false);
+  assert.deepEqual(turnUnit.wire.view(state), { active: false, pending: true });
 });
 
-test('/ask off folds into a pending exit', () => {
-  const state = fold([
-    event(ASK_MODE_EVENT, { active: true }),
-    event('command/run', { commandId: 'c1', name: 'ask', args: 'off' }),
-    event('command/done', { commandId: 'c1', kind: 'success', text: 'Ask mode off.' }),
+test('a failed invocation leaves the mode alone', () => {
+  const state = fold(turnUnit, [
+    ...askRun(),
+    ...askRun({ id: 'c2', args: 'off', kind: 'error' }),
   ]);
-  assert.equal(state.wanted, false);
-  assert.deepEqual(wire.view(state), { active: true, pending: true });
-});
-
-test('a failed /ask run leaves the previous state alone', () => {
-  const state = fold([
-    event('command/run', { commandId: 'c1', name: 'ask', args: '' }),
-    event('command/done', { commandId: 'c1', kind: 'error', text: 'boom' }),
-  ]);
-  assert.equal(state.wanted, null);
+  assert.equal(state.active, true, 'the refused /ask off did not switch the mode');
   assert.equal(state.running, null);
 });
 
-test('a mismatched command/done does not settle the run', () => {
-  const state = fold([
+test('a mismatched command/done does not settle the invocation', () => {
+  const state = fold(turnUnit, [
     event('command/run', { commandId: 'c1', name: 'ask', args: '' }),
     event('command/done', { commandId: 'other', kind: 'success' }),
   ]);
   assert.deepEqual(state.running, { commandId: 'c1', wanted: true });
-  assert.equal(state.wanted, null);
+  assert.equal(state.active, false);
 });
 
 test('command/run without args (recordInput: false) is ignored', () => {
-  const state = fold([event('command/run', { commandId: 'c1', name: 'ask' })]);
-  assert.equal(state.running, null);
+  assert.equal(fold(turnUnit, [event('command/run', { commandId: 'c1', name: 'ask' })]).running, null);
+});
+
+test('turn/end releases a one-turn mode only', () => {
+  const events = [...askRun(), event('turn/end', { turn: 1, reason: { kind: 'completed' } })];
+  assert.equal(fold(turnUnit, events).active, false, 'scope: turn ends with the turn');
+  assert.equal(fold(sessionUnit, events).active, true, 'scope: session stands until /ask off');
+});
+
+test('turn/end leaves an inactive state untouched (same reference)', () => {
+  const off = turnUnit.init();
+  assert.equal(turnUnit.apply(off, event('turn/end', {})), off);
+});
+
+test('turn/end between turns is what lets a new /ask arm the next turn', () => {
+  const state = fold(turnUnit, [
+    ...askRun(),
+    event('turn/end', {}),
+    ...askRun({ id: 'c2' }),
+  ]);
+  assert.equal(state.active, true, 'the second ask armed a fresh turn');
 });
 
 test('request/header records what the model was last told', () => {
-  const on = fold([
-    event(ASK_MODE_EVENT, { active: true }),
-    event('request/header', {}),
-  ]);
-  assert.equal(on.activeAtLastHeader, true);
-  let after = apply(on, event(ASK_MODE_EVENT, { active: false }));
-  after = apply(after, event('request/header', {}));
-  assert.equal(after.activeAtLastHeader, false);
+  const told = fold(turnUnit, [...askRun(), event('request/header', {})]);
+  assert.equal(told.activeAtLastHeader, true);
+  const after = fold(turnUnit, [...askRun(), event('request/header', {}), event('turn/end', {})]);
+  assert.equal(after.activeAtLastHeader, true, 'the header is history, not the current mode');
+  assert.equal(after.active, false);
 });
 
 test('the view reference is stable while the wire value is unchanged', () => {
-  const on = fold([event(ASK_MODE_EVENT, { active: true })]);
-  const first = wire.view(on);
-  const afterHeader = apply(on, event('request/header', {}));
+  const on = fold(turnUnit, askRun());
+  const first = turnUnit.wire.view(on);
+  const afterHeader = turnUnit.apply(on, event('request/header', {}));
   assert.notEqual(afterHeader, on, 'the header changes the state reference');
-  assert.equal(wire.view(afterHeader), first, 'but not the published value');
+  assert.equal(turnUnit.wire.view(afterHeader), first, 'but not the published value');
   assert.ok(Object.isFrozen(first));
 });
 
-test('the host-only state schema is strict', () => {
-  assert.deepEqual(askStateSchema.parse(init()), init());
-  assert.equal(askStateSchema.safeParse({ ...init(), extra: 1 }).success, false);
-  assert.equal(askStateSchema.safeParse({ active: 'yes', wanted: null, running: null, activeAtLastHeader: null }).success, false);
-  assert.equal(askStateSchema.safeParse({ active: false, wanted: 'yes', running: null, activeAtLastHeader: null }).success, false);
+test('the host-only state schema is strict and matches the fold', () => {
+  assert.deepEqual(askStateSchema.parse(turnUnit.init()), turnUnit.init());
+  assert.equal(askStateSchema.safeParse({ ...turnUnit.init(), extra: 1 }).success, false);
+  assert.equal(askStateSchema.safeParse({ active: 'yes', running: null, activeAtLastHeader: null }).success, false);
+  assert.equal(askStateSchema.safeParse({ active: false, running: null }).success, false, 'every key is required');
   assert.equal(askStateSchema.safeParse(null).success, false);
   assert.equal(askStateSchema.safeParse([]).success, false);
-  const ok = askStateSchema.safeParse({ active: true, wanted: null, running: { commandId: 'c', wanted: false }, activeAtLastHeader: null });
+  const ok = askStateSchema.safeParse({ active: true, running: { commandId: 'c', wanted: false }, activeAtLastHeader: null });
   assert.equal(ok.success, true);
-  assert.equal(askStateSchema.safeParse({ active: true, wanted: null, running: { commandId: 'c' }, activeAtLastHeader: null }).success, false);
+  assert.equal(askStateSchema.safeParse({ active: true, running: { commandId: 'c' }, activeAtLastHeader: null }).success, false);
 });
 
 test('the wire schema accepts exactly the view value', () => {

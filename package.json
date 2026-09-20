@@ -1,6 +1,6 @@
 {
   "name": "dsh-helper-plugin-command-ask",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "dsh plugin: an /ask collaboration mode (Cursor-style read-only Q&A) modeled on /plan — a durable per-session mode, a prompt section, an optional read-only tool guard, and the /ask command.",
   "keywords": [
     "dsh",

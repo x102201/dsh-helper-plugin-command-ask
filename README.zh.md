@@ -19,14 +19,25 @@
 | 组成 | 行为 |
 |---|---|
 | `/ask` 命令 | 预置 ask 模式，可带后缀问题（支持图片/文件附件）。`scope: turn`（默认）只覆盖一轮；`scope: session` 是 `/plan` 式常驻模式，直到 `/ask off`。 |
-| 轮次边界 | 逐轮模式由 `agent/turn-stopping` 监听器写回关闭，因此下一次请求组装时就已经没有它了——不需要 `/ask off`。 |
+| 轮次边界 | 逐轮模式由 harness 自己的 `turn/end` 事件释放，因此下一次请求组装时就已经没有它了——不需要 `/ask off`。 |
 | `ask:policy` 提示词分段 | 模式生效时在每次请求都渲染部署方配置的引导文本；未生效时不贡献任何文本。 |
-| 持久状态 | 每次切换在会话日志里写一条整值事件 `ask/mode`，由 `ask` 会话投影单元折叠：恢复（resume）、分叉（fork）、压缩（compaction）后模式都还在。 |
+| 持久状态 | `ask` 投影单元从会话日志里折叠 `/ask` 的 `command/run`/`command/done` 记录以及 `turn/end`。插件**不写任何自有事件类型**，并且每次切换都用 `ctx.sessions.flush()` 立刻落盘，所以重启后模式仍在。 |
 | 只读守卫 | 默认开启：用 `ctx.tools.guard()` 注册单调守卫，在 ask 模式生效时拒绝被列入的改动类工具，并告知模型改为「基于可查看的内容回答」。 |
 | 与 plan 模式接力 | 仅在 `scope: session` 时：常驻 ask 模式与 plan 模式互斥，进入即退出对方。 |
-| 编程接口 | 提供 `ctx.askMode`：`get(agent)`、`set(agent, active)`、`isActive(session)`。 |
+| 编程接口 | 提供 `ctx.askMode`：`get(agent)`、`set(agent, active)`（走真实命令）、`isActive(session)`。 |
 
-每一轮 ask 都是自包含的：引导文本只出现在它管辖的那几次请求里，而 `ask/mode` 事件记录每一次开关。
+每一轮 ask 都是自包含的：引导文本只出现在它管辖的那几次请求里，而日志把每次开关记录成一条普通的 `/ask` 命令记录。
+
+> ### 从 0.1.x 升级
+>
+> 0.1.x 把模式持久化成了它自己的会话事件类型 `ask/mode`。仓库外插件**不能**扩充 harness 的事件词汇表：`Session.append()` 无法设置信封上的 `ignorable` 标记，于是持久化读取路径会拒绝含该事件的日志（*"unknown to this harness and not marked ignorable; refusing to interpret the log"*），**所有跑过 `/ask` 的会话都无法再加载**。0.2.0 不再写这种事件，并用 [`scripts/repair-ask-mode-logs.mjs`](scripts/repair-ask-mode-logs.mjs) 就地给遗留记录补上 ignorable 标记（不能直接删除：日志要求 seq 稠密）：
+>
+> ```sh
+> node scripts/repair-ask-mode-logs.mjs --sessions <DSH_HOME>/sessions                # 先干跑
+> node scripts/repair-ask-mode-logs.mjs --sessions <DSH_HOME>/sessions --apply --backup <dir>
+> ```
+>
+> 投影的 `stateVersion` 升到 2，0.1.x 写下的缓存行会被丢弃并从命令记录重新折叠——不需要额外的迁移。
 
 ## 安装
 
@@ -145,25 +156,26 @@ dsh plugin --profile web remove dsh-helper-plugin-command-ask
 ## 工作原理
 
 ```text
-/ask ──► ctx.commands.register('ask')  ─┐
-                                        ├──► session.append('ask/mode', { active })
-agent/pre-step 瀑布 ────────────────────┘         │
-                                                  ▼
-                              ctx.sessionProjections 单元 'ask'  ──►  view { active, pending }
-                                                  │
-                          ┌───────────────────────┴────────────────────────┐
-                          ▼                                                ▼
-       ctx.systemPrompt.section('ask:policy')              ctx.tools.guard(read-only)
-       （生效时注入到每次请求）                              （生效时拒绝改动类工具）
+/ask ──► ctx.commands.register('ask')  ──► session.append('command/run' | 'command/done')
+                                                        │
+                                                        ▼
+                                    ctx.sessionProjections 单元 'ask'
+                                    折叠 /ask 记录 + turn/end  ──►  view { active, pending }
+                                                        │
+                          ┌─────────────────────────────┴──────────────────────────┐
+                          ▼                                                        ▼
+       ctx.systemPrompt.section('ask:policy')                  ctx.tools.guard(read-only)
+       （生效时注入到每次请求）                                  （生效时拒绝改动类工具）
 ```
 
-- **持久状态就是日志。** `ask/mode` 是整值事件，`ask` 投影单元折叠它（同时把 `/ask` 的 `command/run`/`command/done` 折叠成一个 `pending` 标记）。因此 resume / fork / compaction 天然恢复，没有需要同步的活动镜像。投影 `stateVersion: 1`。
-- **只在步边界落盘。** 轮次之间选择立刻写入日志；轮次进行中则保持 pending，直到下一个被接受的 `agent/pre-step`——这是 Agent 运行期间唯一的追加点——所以切换绝不会落在它并不适用的那一步中间。步骤被拒绝、轮次被取消、写入失败，都会让选择继续挂着。
-- **逐轮自动退出。** 默认 `scope: turn` 由 `agent/turn-stopping` 监听器写回 `ask/mode { active: false }`；该事件在轮次边界提交前被 await，因此下一次请求组装时已经没有 `ask:policy`、也没有守卫。这正是「先问一句、再说'执行'」不需要 `/ask off` 的原因。这里失败会被兜住，绝不影响轮次收尾。
+- **持久状态就是命令记录本身。** `/ask` 是一条命令，命令注册表本来就会为它写 `command/run` + `command/done`；模式只是把这些记录加上 harness 自己的 `turn/end`、`request/header` 折叠出来的结果。resume / fork / compaction 通过重放日志恢复，没有需要同步的活动镜像。
+- **不写自有词汇表。** 仓库外的插件无法新增会话事件类型：`Session.append()` 设置不了信封上的 `ignorable` 标记，而持久化读取路径会拒绝缺少该标记的未知类型。这里的一切都用 harness 已知的事件表达，因此会话日志对任何 harness 都可读——装不装本插件都一样。`test/plugin.test.mjs` 会断言日志里没有别的东西。
+- **立刻落盘。** 投影的变更回调会调用 `ctx.sessions.flush(session)`（harness 自己的检查点入口），所以一次开关远不到一秒就写到磁盘，而不必等下一次模型请求。
+- **逐轮释放。** 默认 `scope: turn` 下，模式由 harness 自己的 `turn/end` 记录结束；下一次请求组装时已经没有 `ask:policy`、也没有守卫。这正是「先问一句、再说'执行'」不需要 `/ask off` 的原因。
 - **提示词稳定。** 分段只注册一次，模式关闭时返回 `''`，因此进出模式都不会改变请求的工具目录。这也是为什么可以用「守卫」而不是「藏工具」来实现强制只读。
-- **切换提示（narration，仅 `scope: session`）。** 当已落盘的切换改变了上一次 `request/header` 描述过的状态时，注入一条 notice（轮次之间用 `agent.inject`，轮次内挂到被接受步骤的消息上），避免模型继续按旧姿态推理。逐轮模式不需要它：引导文本只出现在它管辖的那一轮。
+- **切换提示（narration，仅 `scope: session`）。** 当上一次 `request/header` 描述的模式与当前生效的不一致时，一条 notice 会搭上下一个被接受步骤的消息，避免模型继续按旧姿态推理。逐轮模式不需要它：引导文本只出现在它管辖的那一轮。
 - **强制点。** `ctx.tools.guard()` 是单调的，且在 `tools/pre-execute` 瀑布之后运行：任何监听器都无法翻案，而且对 `run_code` 的嵌套子调用同样生效（工具注册表会把调用方 Agent 传给子调用）。
-- **与 plan 模式接力（仅 `scope: session`）。** 常驻 ask 模式严格弱于 plan 模式，因此二者互斥。插件直接写 plan 模式自己的持久事件 `plan/mode`，而不是调用它的服务：不跨隔离域，日志折叠能像其它模式切换一样恢复结果；若该 profile 没挂 plan 模式，读到的是「无此投影」，什么都不做。
+- **与 plan 模式接力（仅 `scope: session`）。** 常驻 ask 模式严格弱于 plan 模式，因此二者互斥。插件直接写 plan 模式自己的已知事件 `plan/mode`，而不是调用它的服务：不跨隔离域，日志折叠能像其它模式切换一样恢复结果；若该 profile 没挂 plan 模式，读到的是「无此投影」，什么都不做。
 
 ### 与 `/plan` 的差异
 
@@ -183,7 +195,7 @@ agent/pre-step 瀑布 ───────────────────�
 - 真正的硬边界仍在原处：dsh 的 sandbox 模式与审批策略。ask 模式只是按工具名收窄「可以做什么」，它不改变文件系统或进程权限；要真正只读，用 `sandbox: read-only`，与本插件相互独立。
 - 模型仍然可能答错。引导文本要求它给出出处、明说「未能确认」的部分——仅此而已。
 - `scope: turn` 下，那一轮进行中你发的所有内容都还在这一轮里，因此仍是只读；模式是**按轮**释放，不是按条消息释放。想恢复普通干活，下一条排队即可。
-- pending 选择在落盘前是进程内的。如果在下一个被接受的 pre-step 之前进程退出，这次进行中的选择会丢失，需要 UI 重新施加——`/plan` 有同样的性质。
+- 一次开关是**异步**落盘的：`ctx.sessions.flush()` 会让它远不到一秒内写到磁盘，但如果在输入 `/ask` 之后立刻硬杀进程（不给任何 I/O 时间），这条记录可能还没落盘；普通重启（工作台的停止按钮）会走优雅退出，不做特殊处理也不会丢。真丢了也只是模式回到关闭，重新发一次 `/ask` 即可。
 
 ## 兼容性
 
@@ -191,12 +203,13 @@ agent/pre-step 瀑布 ───────────────────�
 
 | 接缝 | 用途 |
 |---|---|
-| `ctx.commands.register()`（可选注入——没有命令面板的 profile 也能用模式本身） | `/ask` 命令 |
+| `ctx.commands.register()`（可选注入——没有命令面板的 profile 也能用模式本身） | `/ask` 命令；它的记录就是持久状态 |
 | `ctx.systemPrompt.section()` + `getSectionOrder('PLAN_POLICY')` | `ask:policy` 分段 |
-| `ctx.sessionProjections.register()` / `stateOf()` | `ask` 单元，以及读取 `plan`/`turnBoundary` |
+| `ctx.sessionProjections.register()` / `stateOf()` / `onChanged()` | `ask` 单元，读取 `plan`/`turnBoundary`，以及触发落盘 |
+| `ctx.sessions.flush()` | 让一次开关立刻持久化 |
 | `ctx.tools.guard()` | 只读拒绝 |
-| `ctx.on('agent/pre-step')`、`agent.steer()`、`agent.inject()` | pending 落盘、问题的 steer、切换提示 |
-| `ctx.on('agent/turn-stopping')` | 逐轮模式的自动退出 |
+| `ctx.on('agent/pre-step')`、`agent.steer()` | `scope: session` 的切换提示，以及把后缀问题 steer 出去 |
+| `session.append()`（只写 `plan/mode`）、`ctx.provide('askMode')` | plan 接力与编程接口 |
 | `session.append()`、`ctx.provide('askMode')` | 持久状态与编程接口 |
 | 投影的 `stateSchema`/`viewSchema` | 自带的极简 `parse` 兼容校验器，不依赖 `zod` |
 
@@ -211,7 +224,7 @@ npm test              # node --test
 npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境）
 ```
 
-82 个测试覆盖：配置校验（含 `scope` 的默认值耦合）、投影折叠与 schema、模式状态机（commit / queue / cancel / no-op、边界落盘、写入失败、plan 模式接力、切换提示、逐轮的 `disarm`）、守卫、包的可安装性性质，以及在伪 Cordis 树上的完整接线——包括「多个 ask 轮各自在自己的边界结束」和 resume 后的日志重放。
+82 个测试覆盖：配置校验（含 `scope` 的默认值耦合）、投影折叠与 schema、只读侧的模式读取与 plan 接力、守卫、包的可安装性性质，以及在伪 Cordis 树上的完整接线——包括「多个 ask 轮各自在自己的轮次结束」、开关立即落盘、`ctx.askMode.set` 走真实命令，以及 resume 后的模式重放。
 
 ### 验证状态
 
@@ -221,22 +234,13 @@ npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境�
 2. **包形态** —— 静态测试守住两种安装方式都依赖的性质：运行时代码不 import 任何裸模块名（`link:` 安装无法解析裸名，Node 按真实路径解析被链接包的 import），且不携带任何需要 pnpm allowlist 的安装期脚本。
 3. **两种安装命令** —— 在一次性 profile 上、dsh `0.1.5-rc.2` + pnpm 12.5.1：
    - `dsh plugin --profile web add link:<绝对路径>` → 初始化 profile、建立链接，**对齐逻辑自己**把 `dsh-helper-plugin-command-ask` 追加进 `dsh.profile.bundles`。
-   - `pnpm pack` → 24 个文件 / 41.5 KB（不含 `node_modules`、`.git`），再 `dsh plugin --profile web add <tarball>` → 同样的对齐、同样的行。
+   - `pnpm pack` → 24 个文件，再 `dsh plugin --profile web add <tarball>` → 同样的对齐、同样的行。
    - 对本仓库 `git clone --bare`，再 `dsh plugin --profile web add git+file://<bare repo>` → 同样的对齐、同样的行。这条走的就是 pnpm 的 git fetcher，也就是 `github:` 的代码路径，只是换了本地传输。
    三种情况下 `--dump-config` 都组合出 `id: command-ask`（名字锚定在已安装副本内部），`--port 0 --no-open` 都能激活并对外服务。
-4. **真实树里的激活** —— `scripts/verify-profile.ps1 -Probe` 会从 `apply()` 内部打印标记：行确实达到 active 状态（dsh 对任何未激活条目都会响亮失败），`apply()` 执行时 `commands`/`tools`/`systemPrompt`/`sessionProjections` 全部解析成功，因此注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调确实跑了。
-5. **实时行为（含真实模型回合，逐轮模式）** —— 对运行中的 web 实例跑 `scripts/verify-live.mjs --model-turns`：**22/22 全部通过**。
+4. **真实树里的激活** —— `scripts/verify-profile.ps1 -Probe` 会从 `apply()` 内部打印标记：行确实达到 active 状态（dsh 对任何未激活条目都会响亮失败），`apply()` 执行时 `commands`/`tools`/`systemPrompt`/`sessionProjections`/`sessions` 全部解析成功，因此注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调确实跑了。
+5. **实时行为（含真实模型回合，逐轮模式）** —— 对运行中的 web 实例跑 `scripts/verify-live.mjs --model-turns`：**22/22 全部通过**，其中包括 *"every event in the log belongs to the harness vocabulary (no plugin-defined types)"*、*"ask mode ended with its turn, with no /ask off"*、*"the next message without /ask created the file"*。
 
-   ```text
-   ok: the ask turn’s system prompt carried the ask-mode guidance
-   ok: ask mode did not create ask-mode-probe-turn.txt
-   ok: ask mode ended with its turn, with no /ask off
-   ok: the durable state ends at [true,false,true,false]
-   ok: the next message without /ask created ask-mode-probe-turn.txt
-   ok: and its request carried no ask-mode guidance
-   ```
-
-   另外单独做了一次实时探针：同一个 ask 轮里让它执行 `git status`，模型连续三次调用 `pwsh`，每次都被拒绝，随后改用 `glob`/`read` 完成回答：
+   另外单独做了一次实时探针：ask 轮里让它执行 `git status`，模型连续三次调用 `pwsh`，每次都被拒绝，随后改用 `glob`/`read` 完成回答：
 
    ```text
    Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the "pwsh" tool is
@@ -246,6 +250,14 @@ npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境�
    ```
 
    也就是说：真正改变结果的是模式（而不是沙箱），并且模式在轮次边界自行释放。
+6. **重启与恢复** —— 同一个环境在跑过 `/ask` 的会话之后被重启（含硬杀）：这些会话都能重新加载（`session/page` 返回其记录），模式从日志恢复；一个「已预置但尚未使用」的 `/ask` 也能挺过硬重启，因为开关会当场落盘：
+
+   ```text
+   session-8d4ba696 … : 重启后 6 条记录
+     seq 3 command/run name=ask args=""
+     seq 4 command/done kind=success
+   ask before paging : {"active":true,"pending":false}
+   ```
 
 **未**覆盖：浏览器里 Web 输入框的往返（插件没有客户端半边，反馈靠命令结果文本，`scope: session` 下另有切换 notice）。命令面能触达的部分，上面都已覆盖。
 
@@ -255,8 +267,8 @@ npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境�
 index.js                     Cordis 插件：接线 + /ask 命令处理器
 cordis.patch.yml             bundle 补丁（dsh.bundle.patch）：插入一行 host 行
 lib/config.js                配置 schema、默认值、内置引导文本
-lib/controller.js            模式状态机（commit / queue / cancel、disarm、切换提示、plan 接力）
-lib/projection.js            `ask` 会话投影单元
+lib/controller.js            只读侧模式读取、plan 接力、切换提示
+lib/projection.js            `ask` 会话投影单元（折叠 /ask 记录与 turn/end）
 lib/guard.js                 只读工具守卫
 lib/message.js               零依赖的 createUserMessage / notice
 lib/schema.js                极简 parse 兼容 schema（不用 zod）
@@ -264,7 +276,8 @@ examples/                    profile 补丁、可携带 --patch 覆盖层、pres
 scripts/run-tests.mjs        单进程测试运行器
 scripts/verify-profile.ps1   针对真实 dsh 的一次性 profile 验证（--dump-config + 启动 + -Probe）
 scripts/verify-live.mjs      针对运行中实例的实时验证（HTTP RPC；--model-turns）
-test/                        测试套件（配置、投影、状态机、守卫、接线、包形态）
+scripts/repair-ask-mode-logs.mjs    修复 0.1.x 写坏的日志（给遗留记录补 ignorable）
+test/                        测试套件（配置、投影、只读读取、守卫、接线、包形态）
 test-support/harness.mjs     驱动接线测试的伪 Cordis 树
 README.md / README.zh.md     中英双语的完整说明
 VERIFICATION.md / .zh.md     实际跑过的验证与原始输出
