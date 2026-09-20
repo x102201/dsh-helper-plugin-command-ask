@@ -2,14 +2,27 @@
 
 [English](README.md) | 中文
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）用的 **`/ask` 协作模式**插件：仿照官方 `/plan` 模式、对齐 Cursor 的 **Ask** 模式——对**这一轮提问**给出只读回答。
+![license: MIT](https://img.shields.io/badge/license-MIT-blue)
+![dsh: 0.1.5-rc.2](https://img.shields.io/badge/dsh-0.1.5--rc.2-4b32c3)
+![tests: 82 passing](https://img.shields.io/badge/tests-82%20passing-brightgreen)
 
-`/ask 问题` 只让这一轮变成只读问答：Agent 只引用它真正读过的内容、不改动任何东西；可选的工具守卫会**强制执行**这一点。**模式在该轮结束时自动关闭**，所以之后不带 `/ask` 的消息就是普通干活：先问，再说一句"执行"即可。`/ask off` 只是提前取消。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）用的 **`/ask` 模式**插件：仿照官方 `/plan` 模式、对齐 Cursor 的 **Ask** 模式——对**这一轮提问**给出只读回答。
+
+**为什么需要它**：平时 `dsh` 会话会边聊边改文件。但有时你只想要一个答案——*这个配置在哪、为什么重试三次、改这里会牵连什么*——而不希望 Agent 动任何东西。ask 轮里它只能看、不能改，而且工具守卫会**真的拦下**改动，即使模型忘了。
+
+**用起来是什么样**：`/ask 问题` 只让这一轮变成只读问答——只引用实读内容、不改动任何东西——**模式在该轮结束时自动释放**，所以之后不带 `/ask` 的消息就是普通干活：先问，再说一句"执行"即可。`/ask off` 只是提前取消。
 
 ```text
 /ask 为什么重试预算是 3？      这一轮只读回答，然后恢复正常
 /ask                          为下一轮预置 ask 模式
 /ask off                      提前取消（从来不必要）
+```
+
+**一行安装：**
+
+```sh
+dsh plugin --profile web add link:/absolute/path/to/dsh-helper-plugin-command-ask
+dsh plugin --profile web add github:x102201/dsh-helper-plugin-command-ask
 ```
 
 ---

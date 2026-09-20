@@ -2,14 +2,27 @@
 
 English | [中文](README.zh.md)
 
-An **`/ask` collaboration mode** for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), modeled on the shipped `/plan` mode and on Cursor's **Ask** mode: a read-only Q&A answer for the turn the question belongs to.
+![license: MIT](https://img.shields.io/badge/license-MIT-blue)
+![dsh: 0.1.5-rc.2](https://img.shields.io/badge/dsh-0.1.5--rc.2-4b32c3)
+![tests: 82 passing](https://img.shields.io/badge/tests-82%20passing-brightgreen)
 
-`/ask <question>` answers that one question read-only — the agent cites what it inspected and changes nothing — and an optional tool guard *enforces* that instead of merely asking for it. **The mode ends with its turn**, so a later message without `/ask` is ordinary work again: ask something, then just say "do it". `/ask off` only cancels the mode early.
+An **`/ask` mode** for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), modeled on the shipped `/plan` mode and on Cursor's **Ask** mode: a read-only Q&A answer for the turn the question belongs to.
+
+**Why it exists:** a normal `dsh` session edits files as it works. Sometimes you only want an answer — *where is this configured, why is this retrying, what breaks if I change it* — without the agent touching anything. In an ask turn it may look but not change, and a tool guard makes that true even when the model forgets.
+
+**How it feels:** `/ask <question>` answers that one question read-only — cited, no edits — and **the mode ends with its turn**, so a later message without `/ask` is ordinary work again. Ask something, then just say "do it". `/ask off` only cancels early.
 
 ```text
 /ask why is the retry budget 3?    answer this read-only, then back to normal
 /ask                              arm ask mode for the next turn
 /ask off                          cancel early (never required)
+```
+
+**Install (one line):**
+
+```sh
+dsh plugin --profile web add link:/absolute/path/to/dsh-helper-plugin-command-ask
+dsh plugin --profile web add github:x102201/dsh-helper-plugin-command-ask
 ```
 
 ---

@@ -1,15 +1,27 @@
 {
   "name": "dsh-helper-plugin-command-ask",
   "version": "0.2.0",
-  "description": "dsh plugin: an /ask collaboration mode (Cursor-style read-only Q&A) modeled on /plan — a durable per-session mode, a prompt section, an optional read-only tool guard, and the /ask command.",
+  "description": "dsh plugin: a Cursor-style /ask mode for DeepSeek Harness (dsh) — read-only Q&A for one turn, with an enforced read-only tool guard and durable state folded from the /ask command records. Installs via link: or github:.",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
-    "command",
+    "cursor",
     "ask-mode",
-    "read-only"
+    "read-only",
+    "slash-command",
+    "cordis",
+    "turn-scoped",
+    "ai-agent"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x102201/dsh-helper-plugin-command-ask.git"
+  },
+  "bugs": {
+    "url": "https://github.com/x102201/dsh-helper-plugin-command-ask/issues"
+  },
+  "homepage": "https://github.com/x102201/dsh-helper-plugin-command-ask#readme",
   "type": "module",
   "main": "index.js",
   "exports": {
