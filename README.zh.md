@@ -68,6 +68,16 @@ dsh plugin --profile web add github:<owner>/<repo>
 dsh web            # 等价于：dsh --profile web
 ```
 
+### 不安装也能直接试
+
+[`examples/standalone.patch.yml`](examples/standalone.patch.yml) 里的 `../index.js` 是相对补丁文件定位的，所以一个裸 checkout 可以直接跑：
+
+```sh
+dsh --profile web --patch <checkout>/examples/standalone.patch.yml
+```
+
+改 `index.js`/`lib/*.js` 时这是最快的循环：不用安装，也不用改 profile。
+
 ### 验证安装
 
 ```sh
@@ -76,6 +86,15 @@ dsh --profile web --dump-config | grep -A2 command-ask
 ```
 
 然后在 Web 界面输入框里输入 `/ask`：斜杠菜单会列出 **`/ask` Enter or leave ask mode (read-only Q&A)**，命令结果提示 `Ask mode on (read-only). Use /ask off to leave.`。随便问一个问题，再试着让它改代码：它应该只描述该怎么改；被守卫拦下的工具调用会返回 `ask mode is read-only`。
+
+不想开浏览器时，可以拿 `dsh web` 打印出来的 URL 直接跑实时验证脚本：
+
+```sh
+node scripts/verify-live.mjs --url "http://127.0.0.1:PORT/?token=TOKEN" --workspace <目录>
+node scripts/verify-live.mjs --url "..." --workspace <目录> --model-turns
+```
+
+它走的是和浏览器同一套 HTTP RPC（先建一个真实会话，再对它下命令），断言 `/ask` 的注册信息、命令结果、实时 `ask` 投影值、以及落盘的 `ask/mode` 事件；加 `--model-turns` 会真的跑两轮模型回合——ask 模式下要求创建文件、`/ask off` 之后再要求一次——并断言文件只在第二轮出现。
 
 ### 卸载
 
@@ -185,24 +204,34 @@ npm run test:direct   # 单进程运行（适配会拦子进程的沙箱环境�
 
 ### 验证状态
 
-每一层都能在本仓库里复现；下面所有实跑都使用一次性 `$DSH_HOME`，**没有碰过任何真实用户 profile**。
+下面每一层都实跑过；带「实时」字样的几层使用一次性 `$DSH_HOME`，并在独立的 dsh 环境（`env_001ca237`）中进行，**没有碰过承载本次对话的那个 profile**。
 
-1. **行为** —— 上面的测试跑真实的 `index.js`/`lib/*.js`，对接一份忠实的 Cordis 接缝替身（`test-support/harness.mjs`）。
-2. **包形态** —— 静态测试守住两种安装方式都依赖的性质：运行时代码不 import 任何裸模块名（`link:` 安装无法解析裸名，因为 Node 按真实路径解析被链接包的 import），且不携带任何需要 pnpm allowlist 的安装期脚本。
-3. **真正的安装命令**，在 dsh `0.1.5-rc.2` + pnpm 12.5.1 的一次性 profile 上实跑：
-   - `dsh plugin --profile web add link:<绝对路径>` → 初始化 profile、建立链接，**对齐逻辑自己**把 `dsh-helper-plugin-command-ask` 追加进 `dsh.profile.bundles`；`--dump-config` 组合出 `id: command-ask` 行（名字锚定在 pnpm 符号链接内部），`--port 0 --no-open` 正常激活并对外服务。
-   - `pnpm pack` → 24 个文件 / 41.5 KB（不含 `node_modules`、`.git`、`.verify`），紧接着 `dsh plugin --profile web add <tarball>` → 同样的对齐结果、同样的行、同样成功启动。`github:` 安装最终落地的就是这样一份打包副本（pnpm 的 git fetcher 用同一套 `files` 规则打包仓库），所以在没有已发布远端的前提下，这是对那条路径最接近的复现。
-4. **树内激活探针** —— `scripts/verify-profile.ps1 -Probe` 还会从 `apply()` 内部打印标记：
+1. **行为** —— 72 个单元/集成测试，跑真实的 `index.js`/`lib/*.js`，对接忠实的 Cordis 接缝替身（`test-support/harness.mjs`）。
+2. **包形态** —— 静态测试守住两种安装方式都依赖的性质：运行时代码不 import 任何裸模块名（`link:` 安装无法解析裸名，Node 按真实路径解析被链接包的 import），且不携带任何需要 pnpm allowlist 的安装期脚本。
+3. **两种安装命令** —— 在一次性 profile 上、dsh `0.1.5-rc.2` + pnpm 12.5.1：
+   - `dsh plugin --profile web add link:<绝对路径>` → 初始化 profile、建立链接，**对齐逻辑自己**把 `dsh-helper-plugin-command-ask` 追加进 `dsh.profile.bundles`。
+   - `pnpm pack` → 24 个文件 / 41.5 KB（不含 `node_modules`、`.git`），再 `dsh plugin --profile web add <tarball>` → 同样的对齐、同样的行。
+   - 对本仓库 `git clone --bare`，再 `dsh plugin --profile web add git+file://<bare repo>` → 同样的对齐、同样的行。这条走的就是 pnpm 的 git fetcher，也就是 `github:` 的代码路径，只是换了本地传输。
+   三种情况下 `--dump-config` 都组合出 `id: command-ask`（名字锚定在已安装副本内部），`--port 0 --no-open` 都能激活并对外服务。
+4. **真实树里的激活** —— `scripts/verify-profile.ps1 -Probe` 会从 `apply()` 内部打印标记：行确实达到 active 状态（dsh 对任何未激活条目都会响亮失败），`apply()` 执行时 `commands`/`tools`/`systemPrompt`/`sessionProjections` 全部解析成功，因此注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调确实跑了。
+5. **实时行为（含真实模型回合）** —— 对运行中的 web 实例跑 `scripts/verify-live.mjs --model-turns`：**18/18 全部通过**。除命令层面的校验外，其中一个真实会话给出：
 
    ```text
-   ok: the bundle patch composed a command-ask row anchored inside the package
-   ok: the web profile activated and served http://127.0.0.1:55789
-   ok: apply() ran in the real tree with every service resolved, and the /ask registration path executed
+   ok: ask mode did not create ask-mode-probe.txt (the guard denied the write)
+   ok: outside ask mode the same request created ask-mode-probe.txt
    ```
 
-   也就是说：整棵树达到 active 状态（dsh 对任何未激活条目都会响亮失败）、`apply()` 真实执行且 `commands`/`tools`/`systemPrompt`/`sessionProjections` 全部解析成功、注册 `/ask` 的 `ctx.inject(['commands'], …)` 回调也确实跑了。
+   该回合里：部署引导文本（"You are in ask mode…"）确实出现在会话的 system prompt 中；模型拒绝动手，并告诉用户去跑 `/ask off`；而当它仍试图查看工作区时，所有工具调用都被拒绝：
 
-**未**覆盖：模式下的真实模型回合，以及 Web 输入框的往返。插件没有客户端半边，所以在真实会话里敲一次 `/ask` 是只有人能确认的最后一步。
+   ```text
+   Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the "pwsh" tool is
+   blocked for this session. Answer from what you can inspect instead, and tell the user
+   to run /ask off (or start a new message outside ask mode) when the change is actually wanted.
+   ```
+
+   `/ask off` 之后，同一个请求顺利经 `write` 工具创建了文件——改变结果的是模式，而不是沙箱。
+
+**未**覆盖：浏览器里 Web 输入框的往返（插件没有客户端半边，反馈靠命令结果文本与切换 notice）。命令面能触达的部分，上面都已覆盖。
 
 ## 目录结构
 
@@ -217,7 +246,8 @@ lib/message.js               零依赖的 createUserMessage / notice
 lib/schema.js                极简 parse 兼容 schema（不用 zod）
 examples/                    profile 补丁、可携带 --patch 覆盖层、preset 挂载示例
 scripts/run-tests.mjs        单进程测试运行器
-scripts/verify-profile.ps1   针对真实 dsh 的一次性 profile 验证
+scripts/verify-profile.ps1   针对真实 dsh 的一次性 profile 验证（--dump-config + 启动 + -Probe）
+scripts/verify-live.mjs      针对运行中实例的实时验证（HTTP RPC；--model-turns）
 test/                        测试套件（配置、投影、状态机、守卫、接线、包形态）
 test-support/harness.mjs     驱动接线测试的伪 Cordis 树
 ```

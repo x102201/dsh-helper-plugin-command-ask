@@ -103,3 +103,14 @@ test('the shipped docs exist for both languages', () => {
     assert.ok(existsSync(join(ROOT, file)), `${file} is missing`);
   }
 });
+
+test('the verification scripts ship with the package', () => {
+  for (const file of ['scripts/run-tests.mjs', 'scripts/verify-profile.ps1', 'scripts/verify-live.mjs']) {
+    assert.ok(existsSync(join(ROOT, file)), `${file} is missing`);
+    assert.ok(manifest.files.includes('scripts'), 'scripts must be packed');
+  }
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  for (const file of ['scripts/verify-profile.ps1', 'scripts/verify-live.mjs', 'examples/profile-patch.yml', 'examples/standalone.patch.yml', 'examples/agent-preset-mount.yml']) {
+    assert.ok(readme.includes(file), `README.md should reference ${file}`);
+  }
+});

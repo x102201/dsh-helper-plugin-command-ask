@@ -68,6 +68,16 @@ Restart the profile to mount it:
 dsh web            # alias of: dsh --profile web
 ```
 
+### Try it without installing
+
+[`examples/standalone.patch.yml`](examples/standalone.patch.yml) anchors `../index.js` to the patch file, so a bare checkout runs as-is:
+
+```sh
+dsh --profile web --patch <checkout>/examples/standalone.patch.yml
+```
+
+That is the fastest loop while editing `index.js`/`lib/*.js`; no install and no profile edit.
+
 ### Verify the install
 
 ```sh
@@ -76,6 +86,15 @@ dsh --profile web --dump-config | grep -A2 command-ask
 ```
 
 Then, in the Web UI composer, type `/ask` — the slash menu lists **`/ask` Enter or leave ask mode (read-only Q&A)**, and the command result says `Ask mode on (read-only). Use /ask off to leave.` Ask a question, and try asking for an edit: the model should explain the change instead of making it, and a denied tool call reports `ask mode is read-only`.
+
+To check a running instance without a browser, point the live script at the URL `dsh web` printed:
+
+```sh
+node scripts/verify-live.mjs --url "http://127.0.0.1:PORT/?token=TOKEN" --workspace <dir>
+node scripts/verify-live.mjs --url "..." --workspace <dir> --model-turns
+```
+
+It drives the same HTTP RPC the browser uses (a live session is created, then commanded), asserting the `/ask` registration, the command results, the live `ask` projection value, and the durable `ask/mode` events. `--model-turns` adds two real turns — one in ask mode asking for a file to be created, one after `/ask off` — and asserts the file appears only in the second.
 
 ### Uninstall
 
@@ -185,24 +204,34 @@ npm run test:direct   # one process instead (for sandboxes that block the runner
 
 ### Verification status
 
-Each layer is reproducible from this checkout; nothing below touched a real user profile (every run used a scratch `$DSH_HOME`).
+Every layer below was run; the live ones used a scratch `$DSH_HOME` and an isolated dsh environment (`env_001ca237`), never the profile serving the authoring session.
 
-1. **Behavior** — the suite above drives the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test-support/harness.mjs`).
+1. **Behavior** — 72 unit/integration tests drive the real `index.js`/`lib/*.js` against a faithful stand-in for the Cordis seams (`test-support/harness.mjs`).
 2. **Package shape** — static tests pin the property both install methods depend on: the runtime imports no bare specifier (a `link:` install cannot resolve one, because Node resolves a linked package's imports from its real path) and the package ships no install-time script pnpm would have to allowlist.
-3. **The actual install commands**, run against scratch profiles with dsh `0.1.5-rc.2` and pnpm 12.5.1:
-   - `dsh plugin --profile web add link:<absolute checkout>` → initialized the profile, linked the checkout, and the reconciler appended `dsh-helper-plugin-command-ask` to `dsh.profile.bundles` on its own; `--dump-config` composed `id: command-ask` with the name anchored inside the pnpm symlink, and `--port 0 --no-open` activated and served the UI.
-   - `pnpm pack` → 24 files / 41.5 KB (no `node_modules`, no `.git`, no `.verify`), then `dsh plugin --profile web add <tarball>` → the same reconciliation, the same composed row, and the same successful boot. A `github:` install materializes exactly this packed copy (pnpm's git fetcher packs the repository with the same `files` rules), so this is the closest reproduction of that path available without a published remote.
-4. **An in-tree activation probe** — `scripts/verify-profile.ps1 -Probe` additionally prints markers from inside `apply()`:
+3. **The install commands** — against scratch profiles, with dsh `0.1.5-rc.2` and pnpm 12.5.1:
+   - `dsh plugin --profile web add link:<absolute checkout>` → initialized the profile, linked the checkout, and the reconciler appended `dsh-helper-plugin-command-ask` to `dsh.profile.bundles` on its own.
+   - `pnpm pack` → 24 files / 41.5 KB (no `node_modules`, no `.git`), then `dsh plugin --profile web add <tarball>` → the same reconciliation and the same composed row.
+   - `git clone --bare` of this repository, then `dsh plugin --profile web add git+file://<bare repo>` → same reconciliation, same row. This is pnpm's git fetcher, i.e. the `github:` code path with a local transport.
+   In every case `--dump-config` composed `id: command-ask` with the name anchored inside the installed copy, and `--port 0 --no-open` activated and served the UI.
+4. **Activation in a real tree** — `scripts/verify-profile.ps1 -Probe` prints markers from inside `apply()`: the row reached the active state (dsh fails loudly on any entry that does not), and `apply()` ran with `commands`, `tools`, `systemPrompt`, and `sessionProjections` all resolved, so the `ctx.inject(['commands'], …)` callback that registers `/ask` executed.
+5. **Live behavior, including real model turns** — `scripts/verify-live.mjs --model-turns` against a running web instance: **18/18 checks passed**. Beyond the command-level checks, one live session produced:
 
    ```text
-   ok: the bundle patch composed a command-ask row anchored inside the package
-   ok: the web profile activated and served http://127.0.0.1:55789
-   ok: apply() ran in the real tree with every service resolved, and the /ask registration path executed
+   ok: ask mode did not create ask-mode-probe.txt (the guard denied the write)
+   ok: outside ask mode the same request created ask-mode-probe.txt
    ```
 
-   i.e. the tree reached the active state (dsh fails loudly on any entry that does not), `apply()` executed with `commands`, `tools`, `systemPrompt`, and `sessionProjections` resolved, and the `ctx.inject(['commands'], …)` callback that registers `/ask` ran.
+   In that run the deployment guidance ("You are in ask mode…") was present in the session's system prompt, the model refused to act and told the user to run `/ask off`, and when it tried to inspect the workspace anyway every tool call came back denied:
 
-Not covered: a real model turn under the mode, and the Web composer round-trip. There is no client half to test, so typing `/ask` in a live session is the one step only a human session can confirm.
+   ```text
+   Error: dsh-helper-plugin-command-ask: ask mode is read-only, so the "pwsh" tool is
+   blocked for this session. Answer from what you can inspect instead, and tell the user
+   to run /ask off (or start a new message outside ask mode) when the change is actually wanted.
+   ```
+
+   After `/ask off` the identical request went through the `write` tool and created the file, so the mode — not the sandbox — was what changed.
+
+Not covered: the Web composer round-trip through a browser (there is no client half — feedback is the command result text and the narration notice). Everything the command surface can reach is covered above.
 
 ## Layout
 
@@ -217,7 +246,8 @@ lib/message.js               dependency-free createUserMessage / notice
 lib/schema.js                tiny parse-compatible schemas (no zod)
 examples/                    profile patch, portable --patch overlay, agent-preset mount
 scripts/run-tests.mjs        single-process test runner
-scripts/verify-profile.ps1   scratch-profile verification against a real dsh
+scripts/verify-profile.ps1   scratch-profile verification against a real dsh (--dump-config + boot + -Probe)
+scripts/verify-live.mjs      live verification against a running instance (HTTP RPC; --model-turns)
 test/                        the suite (config, projection, controller, guard, wiring, package shape)
 test-support/harness.mjs     the fake-Cordis tree the wiring tests drive
 ```
