@@ -27,6 +27,10 @@ dsh plugin --profile web add github:x102201/dsh-helper-plugin-command-ask
 
 ---
 
+<a href="docs/assets/ask-mode-demo.mp4"><img src="docs/assets/ask-mode-demo.gif" alt="/ask 只读回答一轮并拒绝写入，随后不带 /ask 的消息正常创建文件" width="900"></a>
+
+*在 dsh-helper 工作台实录，1.6 倍速：`/ask 问题` 拒绝写入并说明原因，随后一条普通消息"执行"就真的创建了文件。→ [更清晰的 MP4（0.8 MB）](docs/assets/ask-mode-demo.mp4)*
+
 ## 它做了什么
 
 | 组成 | 行为 |

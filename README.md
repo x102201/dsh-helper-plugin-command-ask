@@ -27,6 +27,10 @@ dsh plugin --profile web add github:x102201/dsh-helper-plugin-command-ask
 
 ---
 
+<a href="docs/assets/ask-mode-demo.mp4"><img src="docs/assets/ask-mode-demo.gif" alt="/ask answers a question read-only and refuses to write, then the next message without /ask creates the file" width="900"></a>
+
+*Recorded in the dsh-helper workbench, 1.6× speed: `/ask <question>` refuses to write and explains why, then the plain "do it" message creates the file. → [clearer MP4 (0.8 MB)](docs/assets/ask-mode-demo.mp4)*
+
 ## What it does
 
 | Piece | Behavior |
